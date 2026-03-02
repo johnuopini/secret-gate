@@ -1,0 +1,51 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Run tests
+        run: go test ./... -count=1
+
+      - name: Build client binaries
+        run: |
+          mkdir -p dist
+          for GOOS in linux darwin; do
+            for GOARCH in amd64 arm64; do
+              CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH \
+                go build -ldflags="-s -w" -o dist/secret-gate-${GOOS}-${GOARCH} ./cmd/client
+            done
+          done
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t ghcr.io/johnuopini/secret-gate:${{ github.ref_name }} .
+          docker tag ghcr.io/johnuopini/secret-gate:${{ github.ref_name }} ghcr.io/johnuopini/secret-gate:latest
+          docker push ghcr.io/johnuopini/secret-gate:${{ github.ref_name }}
+          docker push ghcr.io/johnuopini/secret-gate:latest
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*

@@ -1,0 +1,15 @@
+services:
+  secret-gate:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      OP_CONNECT_HOST: "${OP_CONNECT_HOST}"
+      OP_CONNECT_TOKEN: "${OP_CONNECT_TOKEN}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID}"
+      WEBHOOK_BASE_URL: "${WEBHOOK_BASE_URL}"
+      REQUEST_TTL: "${REQUEST_TTL:-15m}"
+      CLEANUP_INTERVAL: "${CLEANUP_INTERVAL:-5m}"
+    restart: unless-stopped
