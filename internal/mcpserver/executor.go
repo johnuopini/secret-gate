@@ -9,12 +9,27 @@ import (
 	"time"
 )
 
+// Executor constants.
+const (
+	defaultExecTimeout = 30 * time.Second
+	maxOutputSize      = 1 << 20 // 1MB
+)
+
+// truncateOutput caps output at maxOutputSize and appends a truncation notice.
+func truncateOutput(s string) string {
+	if len(s) <= maxOutputSize {
+		return s
+	}
+	return s[:maxOutputSize] + "\n[output truncated at 1MB]"
+}
+
 // execCommand runs a shell command with additional environment variables injected.
 // It uses "sh -c" to execute the command, inherits the current process environment,
 // and adds the provided env vars on top. stdout and stderr are captured separately.
+// Output is capped at 1MB per stream to prevent unbounded memory usage.
 func execCommand(ctx context.Context, command string, envVars map[string]string, workingDir string, timeout time.Duration) (*ExecResult, error) {
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = defaultExecTimeout
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -41,8 +56,8 @@ func execCommand(ctx context.Context, command string, envVars map[string]string,
 	err := cmd.Run()
 
 	result := &ExecResult{
-		Stdout: stdout.String(),
-		Stderr: stderr.String(),
+		Stdout: truncateOutput(stdout.String()),
+		Stderr: truncateOutput(stderr.String()),
 	}
 
 	if err != nil {

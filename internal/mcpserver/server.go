@@ -5,10 +5,19 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/johnuopini/secret-gate/internal/daemon"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// Handler defaults.
+const (
+	defaultSearchLimit  = 10
+	defaultSSHPort      = 22
+	defaultSSHTimeout   = 120 * time.Second
+	defaultSSHAgentTTL  = 1 * time.Hour
 )
 
 // --- Interfaces ---
@@ -31,7 +40,7 @@ type FullDaemonClient interface {
 type ProxyClient interface {
 	Search(query string, limit int) ([]SearchResultItem, error)
 	GetFields(secretName, vault string) (*FieldsResult, error)
-	Request(secretName, vault, reason string) (*RequestResult, error)
+	Request(ctx context.Context, secretName, vault, reason string) (*RequestResult, error)
 }
 
 // --- Shared types ---
@@ -238,7 +247,7 @@ func handleSearchSecrets(_ context.Context, pc ProxyClient, input SearchSecretsI
 
 	limit := input.Limit
 	if limit <= 0 {
-		limit = 10
+		limit = defaultSearchLimit
 	}
 
 	results, err := pc.Search(input.Query, limit)
@@ -266,7 +275,7 @@ func handleInspectFields(_ context.Context, pc ProxyClient, input InspectFieldsI
 	return nil, *result, nil
 }
 
-func handleRequestSecret(_ context.Context, dc FullDaemonClient, pc ProxyClient, input RequestSecretInput) (*mcp.CallToolResult, RequestSecretOutput, error) {
+func handleRequestSecret(ctx context.Context, dc FullDaemonClient, pc ProxyClient, input RequestSecretInput) (*mcp.CallToolResult, RequestSecretOutput, error) {
 	if input.SecretName == "" {
 		return toolError("secret_name is required"), RequestSecretOutput{}, nil
 	}
@@ -293,7 +302,7 @@ func handleRequestSecret(_ context.Context, dc FullDaemonClient, pc ProxyClient,
 	}
 
 	// Submit request via proxy
-	result, err := pc.Request(input.SecretName, input.Vault, input.Reason)
+	result, err := pc.Request(ctx, input.SecretName, input.Vault, input.Reason)
 	if err != nil {
 		return toolError("failed to request secret: " + err.Error()), RequestSecretOutput{}, nil
 	}
@@ -336,7 +345,7 @@ func handleExecWithSecret(ctx context.Context, dc FullDaemonClient, input ExecWi
 
 	timeout := time.Duration(input.TimeoutSec) * time.Second
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = defaultExecTimeout
 	}
 
 	envVars := map[string]string{
@@ -388,7 +397,7 @@ func handleSSHWithSecret(ctx context.Context, dc FullDaemonClient, cfg Config, i
 	if cfg.SSHAgent {
 		ttl := time.Duration(cfg.CacheTTLSec) * time.Second
 		if ttl <= 0 {
-			ttl = 1 * time.Hour
+			ttl = defaultSSHAgentTTL
 		}
 		if err := daemon.AddToSSHAgent(keyValue, ttl); err != nil {
 			return toolError(fmt.Sprintf("failed to add SSH key (%s) to ssh-agent: %v", fieldName, err)), SSHWithSecretOutput{}, nil
@@ -398,7 +407,7 @@ func handleSSHWithSecret(ctx context.Context, dc FullDaemonClient, cfg Config, i
 	// Build SSH command
 	port := input.Port
 	if port <= 0 {
-		port = 22
+		port = defaultSSHPort
 	}
 	sshArgs := []string{"-p", fmt.Sprintf("%d", port)}
 	sshArgs = append(sshArgs, input.Host)
@@ -408,7 +417,7 @@ func handleSSHWithSecret(ctx context.Context, dc FullDaemonClient, cfg Config, i
 
 	timeout := time.Duration(input.Timeout) * time.Second
 	if timeout <= 0 {
-		timeout = 120 * time.Second
+		timeout = defaultSSHTimeout
 	}
 
 	// Build the ssh command string
@@ -463,8 +472,9 @@ func shellQuote(s string) string {
 
 // realDaemonClient wraps daemon.Client to implement FullDaemonClient.
 type realDaemonClient struct {
-	client  *daemon.Client
-	selfBin string
+	mu          sync.Mutex
+	client      *daemon.Client
+	selfBin     string
 	cacheTTLSec int
 }
 
@@ -515,6 +525,8 @@ func (r *realDaemonClient) Store(secretName, vault string, fields map[string]str
 }
 
 func (r *realDaemonClient) EnsureRunning() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.client.IsRunning() {
 		return nil
 	}

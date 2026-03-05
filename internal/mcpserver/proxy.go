@@ -2,14 +2,19 @@ package mcpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"time"
+)
 
-	"github.com/johnuopini/secret-gate/internal/daemon"
+// Polling and timeout constants for the approval flow.
+const (
+	defaultPollInterval = 5 * time.Second
+	defaultPollTimeout  = 15 * time.Minute
 )
 
 // --- HTTP proxy client ---
@@ -19,7 +24,6 @@ type httpProxyClient struct {
 	serverURL   string
 	dc          FullDaemonClient
 	cacheTTLSec int
-	sshAgent    bool
 	httpClient  *http.Client
 }
 
@@ -29,7 +33,6 @@ func NewHTTPProxyClient(serverURL string, dc FullDaemonClient, cacheTTLSec int, 
 		serverURL:   serverURL,
 		dc:          dc,
 		cacheTTLSec: cacheTTLSec,
-		sshAgent:    sshAgent,
 		httpClient:  &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -166,7 +169,7 @@ func (p *httpProxyClient) GetFields(secretName, vault string) (*FieldsResult, er
 	}, nil
 }
 
-func (p *httpProxyClient) Request(secretName, vault, reason string) (*RequestResult, error) {
+func (p *httpProxyClient) Request(ctx context.Context, secretName, vault, reason string) (*RequestResult, error) {
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "mcp-agent"
@@ -209,49 +212,53 @@ func (p *httpProxyClient) Request(secretName, vault, reason string) (*RequestRes
 		return nil, fmt.Errorf("parsing request response: %w", err)
 	}
 
-	// Step 2: Poll for approval
-	deadline := time.Now().Add(15 * time.Minute)
-	pollInterval := 5 * time.Second
+	// Step 2: Poll for approval with context and deadline
+	ticker := time.NewTicker(defaultPollInterval)
+	defer ticker.Stop()
+	deadline := time.After(defaultPollTimeout)
 
-	for time.Now().Before(deadline) {
-		status, err := p.checkStatus(reqResp.StatusURL)
-		if err != nil {
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		switch status.Status {
-		case "pending":
-			time.Sleep(pollInterval)
-			continue
-		case "approved":
-			// Step 3: Retrieve secret and cache it
-			return p.retrieveAndCache(status.SecretURL, secretName, vault)
-		case "denied":
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline:
 			return &RequestResult{
-				Status:     "denied",
+				Status:     "timeout",
 				SecretName: secretName,
 				Cached:     false,
-				Message:    "Request was denied by the approver.",
+				Message:    "Timed out waiting for approval.",
 			}, nil
-		case "expired":
-			return &RequestResult{
-				Status:     "expired",
-				SecretName: secretName,
-				Cached:     false,
-				Message:    "Request expired before approval.",
-			}, nil
-		default:
-			return nil, fmt.Errorf("unknown status: %s", status.Status)
+		case <-ticker.C:
+			status, err := p.checkStatus(reqResp.StatusURL)
+			if err != nil {
+				continue
+			}
+
+			switch status.Status {
+			case "pending":
+				continue
+			case "approved":
+				// Step 3: Retrieve secret and cache it
+				return p.retrieveAndCache(status.SecretURL, secretName, vault)
+			case "denied":
+				return &RequestResult{
+					Status:     "denied",
+					SecretName: secretName,
+					Cached:     false,
+					Message:    "Request was denied by the approver.",
+				}, nil
+			case "expired":
+				return &RequestResult{
+					Status:     "expired",
+					SecretName: secretName,
+					Cached:     false,
+					Message:    "Request expired before approval.",
+				}, nil
+			default:
+				return nil, fmt.Errorf("unknown status: %s", status.Status)
+			}
 		}
 	}
-
-	return &RequestResult{
-		Status:     "timeout",
-		SecretName: secretName,
-		Cached:     false,
-		Message:    "Timed out waiting for approval.",
-	}, nil
 }
 
 func (p *httpProxyClient) checkStatus(url string) (*statusResponse, error) {
@@ -307,36 +314,28 @@ func (p *httpProxyClient) retrieveAndCache(secretURL, secretName, vault string) 
 		return nil, fmt.Errorf("parsing secret response: %w", err)
 	}
 
-	// Cache in daemon
-	if p.dc != nil {
-		if err := p.dc.EnsureRunning(); err == nil {
-			_ = p.dc.Store(secretName, vault, secretResp.Secret, p.cacheTTLSec)
-		}
-	}
-
-	// Add SSH keys to agent if applicable
-	if p.sshAgent {
-		_, keyValue, found := daemon.FindSSHKeyField(secretResp.Secret)
-		if found {
-			ttl := time.Duration(p.cacheTTLSec) * time.Second
-			if ttl <= 0 {
-				ttl = 1 * time.Hour
-			}
-			_ = daemon.AddToSSHAgent(keyValue, ttl)
-		}
-	}
-
 	// Build field names list (but NOT values)
 	fieldNames := make([]string, 0, len(secretResp.Secret))
 	for k := range secretResp.Secret {
 		fieldNames = append(fieldNames, k)
 	}
 
-	return &RequestResult{
+	result := &RequestResult{
 		Status:          "approved",
 		SecretName:      secretName,
 		Cached:          true,
 		FieldsAvailable: fieldNames,
 		Message:         "Secret approved and cached. Use exec_with_secret or ssh_with_secret to use it.",
-	}, nil
+	}
+
+	// Cache in daemon
+	if p.dc != nil {
+		if err := p.dc.EnsureRunning(); err != nil {
+			result.Message = "Warning: secret approved but daemon failed to start: " + err.Error()
+		} else if err := p.dc.Store(secretName, vault, secretResp.Secret, p.cacheTTLSec); err != nil {
+			result.Message = "Warning: secret approved but caching failed: " + err.Error()
+		}
+	}
+
+	return result, nil
 }

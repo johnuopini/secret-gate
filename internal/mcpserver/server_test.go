@@ -99,7 +99,7 @@ func (m *mockProxyClient) GetFields(secretName, vault string) (*FieldsResult, er
 	return m.fieldsResult, nil
 }
 
-func (m *mockProxyClient) Request(secretName, vault, reason string) (*RequestResult, error) {
+func (m *mockProxyClient) Request(_ context.Context, secretName, vault, reason string) (*RequestResult, error) {
 	if m.requestErr != nil {
 		return nil, m.requestErr
 	}

@@ -624,9 +624,7 @@ func handleMCPSubcommand() {
 	dc := mcpserver.NewRealDaemonClientWithConfig(cacheTTLSec)
 
 	// Try to ensure daemon is running (non-fatal if it fails)
-	if fdc, ok := dc.(mcpserver.FullDaemonClient); ok {
-		_ = fdc.EnsureRunning()
-	}
+	_ = dc.EnsureRunning()
 
 	// Create proxy client
 	pc := mcpserver.NewHTTPProxyClient(cfg.ServerURL, dc, cacheTTLSec, cfg.SSHAgentIntegration)
