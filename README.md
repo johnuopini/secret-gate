@@ -102,10 +102,6 @@ docker run -d \
   ghcr.io/johnuopini/secret-gate:latest
 ```
 
-### OpenFaaS
-
-Secret Gate can be deployed as an OpenFaaS function. Secrets are read from `/var/openfaas/secrets/` when available. See the included `secret-gate.yml` for the function definition.
-
 ### Binary
 
 ```bash
