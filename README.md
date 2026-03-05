@@ -18,18 +18,28 @@ AI coding agents need credentials — SSH keys, API tokens, database passwords �
 
 ### Without Secret Gate
 
+Your agent needs credentials, and your options are bad:
+
+- **1Password CLI locally** — requires the agent's machine to have `op` installed and authenticated. Works on your laptop, breaks on remote VMs, CI runners, and cloud dev environments.
+- **Service account with vault access** — gives the agent (and anyone who compromises it) access to your *entire vault*. One leaked token = all secrets exposed.
+- **Manual copy-paste** — you become the bottleneck. Every credential request interrupts your flow.
+
+In all cases, secrets end up in plaintext — written to temp files, exported as env vars in shell history, or pasted into the conversation.
+
+### With Secret Gate (CLI)
+
 ```
 Agent: "I need the deploy SSH key"
-→ You approve the secret-gate request on Telegram
-→ Agent writes key to /tmp/key ← INSECURE
+→ You approve once on Telegram
+→ Agent writes key to /tmp/key ← still on disk
 → Agent runs: export TOKEN=sk-... ← needs your approval
 → Agent runs: ssh -i /tmp/key ... ← needs your approval
 → Agent runs: rm /tmp/key ← needs your approval
 ```
 
-Four manual approvals, secrets on disk.
+Better — approval is remote and per-secret — but still four manual shell approvals and secrets on disk.
 
-### With Secret Gate MCP
+### With Secret Gate + MCP
 
 ```
 Agent: "I need the deploy SSH key"
@@ -38,7 +48,7 @@ Agent: "I need the deploy SSH key"
 → Done.
 ```
 
-One approval, zero secrets on disk, zero manual shell approvals.
+One tap on your phone. Zero secrets on disk. Zero manual shell approvals. The agent never sees the secret value — it's injected into the subprocess environment only.
 
 ## How It Works
 
