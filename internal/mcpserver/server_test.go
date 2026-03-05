@@ -304,6 +304,18 @@ func TestHandleRequestSecret_EmptyName(t *testing.T) {
 	}
 }
 
+func TestHandleRequestSecret_EmptyReason(t *testing.T) {
+	dc := newMockDaemonClient(true)
+	pc := &mockProxyClient{}
+	result, _, err := handleRequestSecret(context.Background(), dc, pc, RequestSecretInput{SecretName: "my-secret"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatal("expected tool error for empty reason")
+	}
+}
+
 func TestHandleRequestSecret_CacheHit(t *testing.T) {
 	dc := newMockDaemonClient(true)
 	dc.cache["my-secret:"] = map[string]string{
@@ -312,7 +324,7 @@ func TestHandleRequestSecret_CacheHit(t *testing.T) {
 	}
 	pc := &mockProxyClient{}
 
-	result, output, err := handleRequestSecret(context.Background(), dc, pc, RequestSecretInput{SecretName: "my-secret"})
+	result, output, err := handleRequestSecret(context.Background(), dc, pc, RequestSecretInput{SecretName: "my-secret", Reason: "need creds for deploy"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -375,7 +387,7 @@ func TestHandleRequestSecret_Denied(t *testing.T) {
 		},
 	}
 
-	result, output, err := handleRequestSecret(context.Background(), dc, pc, RequestSecretInput{SecretName: "forbidden-secret"})
+	result, output, err := handleRequestSecret(context.Background(), dc, pc, RequestSecretInput{SecretName: "forbidden-secret", Reason: "testing denied flow"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -394,7 +406,7 @@ func TestHandleRequestSecret_ProxyError(t *testing.T) {
 	dc := newMockDaemonClient(false)
 	pc := &mockProxyClient{requestErr: fmt.Errorf("network error")}
 
-	result, _, err := handleRequestSecret(context.Background(), dc, pc, RequestSecretInput{SecretName: "my-secret"})
+	result, _, err := handleRequestSecret(context.Background(), dc, pc, RequestSecretInput{SecretName: "my-secret", Reason: "testing proxy error"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -411,7 +423,7 @@ func TestHandleRequestSecret_DoesNotReturnSecretValues(t *testing.T) {
 	}
 	pc := &mockProxyClient{}
 
-	_, output, err := handleRequestSecret(context.Background(), dc, pc, RequestSecretInput{SecretName: "sensitive", Vault: "vault1"})
+	_, output, err := handleRequestSecret(context.Background(), dc, pc, RequestSecretInput{SecretName: "sensitive", Vault: "vault1", Reason: "checking for leaks"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -450,10 +462,10 @@ func TestHandleExecWithSecret_MissingFields(t *testing.T) {
 		name  string
 		input ExecWithSecretInput
 	}{
-		{"empty secret_name", ExecWithSecretInput{FieldName: "f", EnvVar: "E", Command: "echo"}},
-		{"empty field_name", ExecWithSecretInput{SecretName: "s", EnvVar: "E", Command: "echo"}},
-		{"empty env_var", ExecWithSecretInput{SecretName: "s", FieldName: "f", Command: "echo"}},
-		{"empty command", ExecWithSecretInput{SecretName: "s", FieldName: "f", EnvVar: "E"}},
+		{"empty secret_name", ExecWithSecretInput{Field: "f", EnvVar: "E", Command: "echo"}},
+		{"empty field", ExecWithSecretInput{SecretName: "s", EnvVar: "E", Command: "echo"}},
+		{"empty env_var", ExecWithSecretInput{SecretName: "s", Field: "f", Command: "echo"}},
+		{"empty command", ExecWithSecretInput{SecretName: "s", Field: "f", EnvVar: "E"}},
 	}
 
 	for _, tt := range tests {
@@ -472,7 +484,7 @@ func TestHandleExecWithSecret_MissingFields(t *testing.T) {
 func TestHandleExecWithSecret_DaemonNotRunning(t *testing.T) {
 	dc := newMockDaemonClient(false)
 	result, _, err := handleExecWithSecret(context.Background(), dc, ExecWithSecretInput{
-		SecretName: "s", FieldName: "f", EnvVar: "E", Command: "echo",
+		SecretName: "s", Field: "f", EnvVar: "E", Command: "echo",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -485,7 +497,7 @@ func TestHandleExecWithSecret_DaemonNotRunning(t *testing.T) {
 func TestHandleExecWithSecret_NotCached(t *testing.T) {
 	dc := newMockDaemonClient(true)
 	result, _, err := handleExecWithSecret(context.Background(), dc, ExecWithSecretInput{
-		SecretName: "uncached-secret", FieldName: "password", EnvVar: "DB_PASS", Command: "echo",
+		SecretName: "uncached-secret", Field: "password", EnvVar: "DB_PASS", Command: "echo",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -504,7 +516,7 @@ func TestHandleExecWithSecret_FieldNotFound(t *testing.T) {
 
 	result, _, err := handleExecWithSecret(context.Background(), dc, ExecWithSecretInput{
 		SecretName: "my-secret",
-		FieldName:  "nonexistent",
+		Field:  "nonexistent",
 		EnvVar:     "SECRET",
 		Command:    "echo test",
 	})
@@ -528,7 +540,7 @@ func TestHandleExecWithSecret_Success(t *testing.T) {
 
 	result, output, err := handleExecWithSecret(context.Background(), dc, ExecWithSecretInput{
 		SecretName: "my-secret",
-		FieldName:  "password",
+		Field:  "password",
 		EnvVar:     "MY_SECRET_PASSWORD",
 		Command:    "echo $MY_SECRET_PASSWORD",
 		TimeoutSec: 5,
@@ -545,6 +557,9 @@ func TestHandleExecWithSecret_Success(t *testing.T) {
 	if strings.TrimSpace(output.Stdout) != "s3cret" {
 		t.Errorf("expected stdout='s3cret', got %q", strings.TrimSpace(output.Stdout))
 	}
+	if output.SecretUsed != "my-secret/password" {
+		t.Errorf("expected secret_used='my-secret/password', got %q", output.SecretUsed)
+	}
 }
 
 func TestHandleExecWithSecret_CommandFailure(t *testing.T) {
@@ -559,7 +574,7 @@ func TestHandleExecWithSecret_CommandFailure(t *testing.T) {
 
 	result, output, err := handleExecWithSecret(context.Background(), dc, ExecWithSecretInput{
 		SecretName: "my-secret",
-		FieldName:  "key",
+		Field:  "key",
 		EnvVar:     "K",
 		Command:    "exit 42",
 		TimeoutSec: 5,
@@ -588,7 +603,7 @@ func TestHandleExecWithSecret_SecretNotInOutput(t *testing.T) {
 	// The command doesn't echo the secret, so it shouldn't appear in output
 	result, output, err := handleExecWithSecret(context.Background(), dc, ExecWithSecretInput{
 		SecretName: "cred",
-		FieldName:  "token",
+		Field:  "token",
 		EnvVar:     "AUTH_TOKEN",
 		Command:    "echo 'done'",
 		TimeoutSec: 5,
@@ -617,7 +632,7 @@ func TestHandleExecWithSecret_WorkingDir(t *testing.T) {
 	tmpDir := os.TempDir()
 	result, output, err := handleExecWithSecret(context.Background(), dc, ExecWithSecretInput{
 		SecretName: "my-secret",
-		FieldName:  "key",
+		Field:  "key",
 		EnvVar:     "K",
 		Command:    "pwd",
 		WorkingDir: tmpDir,

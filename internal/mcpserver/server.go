@@ -99,13 +99,13 @@ type InspectFieldsInput struct {
 type RequestSecretInput struct {
 	SecretName string `json:"secret_name" jsonschema:"name of the secret to request"`
 	Vault      string `json:"vault,omitempty" jsonschema:"vault name (optional)"`
-	Reason     string `json:"reason,omitempty" jsonschema:"reason for requesting access (shown in Telegram approval)"`
+	Reason     string `json:"reason" jsonschema:"reason for requesting access (shown in Telegram approval)"`
 }
 
 type ExecWithSecretInput struct {
 	SecretName string `json:"secret_name" jsonschema:"name of the previously approved secret"`
 	Vault      string `json:"vault,omitempty" jsonschema:"vault name (optional)"`
-	FieldName  string `json:"field_name" jsonschema:"field name to inject as environment variable"`
+	Field      string `json:"field" jsonschema:"field name to inject as environment variable"`
 	EnvVar     string `json:"env_var" jsonschema:"environment variable name to set"`
 	Command    string `json:"command" jsonschema:"shell command to execute (runs via sh -c)"`
 	WorkingDir string `json:"working_dir,omitempty" jsonschema:"working directory for the command"`
@@ -113,13 +113,12 @@ type ExecWithSecretInput struct {
 }
 
 type SSHWithSecretInput struct {
-	SecretName string   `json:"secret_name" jsonschema:"name of the secret containing the SSH key"`
-	Vault      string   `json:"vault,omitempty" jsonschema:"vault name (optional)"`
-	Host       string   `json:"host" jsonschema:"SSH host to connect to"`
-	User       string   `json:"user,omitempty" jsonschema:"SSH username"`
-	Command    string   `json:"command,omitempty" jsonschema:"command to run on the remote host"`
-	Args       []string `json:"args,omitempty" jsonschema:"additional SSH arguments"`
-	TimeoutSec int      `json:"timeout_sec,omitempty" jsonschema:"SSH timeout in seconds (default 30)"`
+	SecretName string `json:"secret_name" jsonschema:"SSH key secret name (must be approved and cached)"`
+	Host       string `json:"host" jsonschema:"SSH destination (user@host format)"`
+	Command    string `json:"command,omitempty" jsonschema:"remote command to execute"`
+	Vault      string `json:"vault,omitempty" jsonschema:"vault name"`
+	Port       int    `json:"port,omitempty" jsonschema:"SSH port (default 22)"`
+	Timeout    int    `json:"timeout,omitempty" jsonschema:"timeout in seconds (default 120)"`
 }
 
 // --- Tool Output types ---
@@ -136,9 +135,19 @@ type InspectFieldsOutput = FieldsResult
 
 type RequestSecretOutput = RequestResult
 
-type ExecWithSecretOutput = ExecResult
+type ExecWithSecretOutput struct {
+	ExitCode   int    `json:"exit_code"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	SecretUsed string `json:"secret_used"`
+}
 
-type SSHWithSecretOutput = ExecResult
+type SSHWithSecretOutput struct {
+	ExitCode   int    `json:"exit_code"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	SecretUsed string `json:"secret_used"`
+}
 
 // --- Config ---
 
@@ -261,6 +270,9 @@ func handleRequestSecret(_ context.Context, dc FullDaemonClient, pc ProxyClient,
 	if input.SecretName == "" {
 		return toolError("secret_name is required"), RequestSecretOutput{}, nil
 	}
+	if input.Reason == "" {
+		return toolError("reason is required — explain why you need this secret so the approver can make an informed decision"), RequestSecretOutput{}, nil
+	}
 
 	// Check if already cached in daemon
 	if dc.IsRunning() {
@@ -293,8 +305,8 @@ func handleExecWithSecret(ctx context.Context, dc FullDaemonClient, input ExecWi
 	if input.SecretName == "" {
 		return toolError("secret_name is required"), ExecWithSecretOutput{}, nil
 	}
-	if input.FieldName == "" {
-		return toolError("field_name is required"), ExecWithSecretOutput{}, nil
+	if input.Field == "" {
+		return toolError("field is required"), ExecWithSecretOutput{}, nil
 	}
 	if input.EnvVar == "" {
 		return toolError("env_var is required"), ExecWithSecretOutput{}, nil
@@ -313,13 +325,13 @@ func handleExecWithSecret(ctx context.Context, dc FullDaemonClient, input ExecWi
 		return toolError(fmt.Sprintf("secret %q is not cached. Call request_secret first to approve and cache the secret.", input.SecretName)), ExecWithSecretOutput{}, nil
 	}
 
-	fieldValue, ok := fields[input.FieldName]
+	fieldValue, ok := fields[input.Field]
 	if !ok {
 		availableFields := make([]string, 0, len(fields))
 		for k := range fields {
 			availableFields = append(availableFields, k)
 		}
-		return toolError(fmt.Sprintf("field %q not found in secret %q. Available fields: %s", input.FieldName, input.SecretName, strings.Join(availableFields, ", "))), ExecWithSecretOutput{}, nil
+		return toolError(fmt.Sprintf("field %q not found in secret %q. Available fields: %s", input.Field, input.SecretName, strings.Join(availableFields, ", "))), ExecWithSecretOutput{}, nil
 	}
 
 	timeout := time.Duration(input.TimeoutSec) * time.Second
@@ -336,7 +348,12 @@ func handleExecWithSecret(ctx context.Context, dc FullDaemonClient, input ExecWi
 		return toolError("command execution failed: " + err.Error()), ExecWithSecretOutput{}, nil
 	}
 
-	return nil, *result, nil
+	return nil, ExecWithSecretOutput{
+		ExitCode:   result.ExitCode,
+		Stdout:     result.Stdout,
+		Stderr:     result.Stderr,
+		SecretUsed: input.SecretName + "/" + input.Field,
+	}, nil
 }
 
 func handleSSHWithSecret(ctx context.Context, dc FullDaemonClient, cfg Config, input SSHWithSecretInput) (*mcp.CallToolResult, SSHWithSecretOutput, error) {
@@ -379,19 +396,19 @@ func handleSSHWithSecret(ctx context.Context, dc FullDaemonClient, cfg Config, i
 	}
 
 	// Build SSH command
-	sshArgs := []string{}
-	if input.User != "" {
-		sshArgs = append(sshArgs, "-l", input.User)
+	port := input.Port
+	if port <= 0 {
+		port = 22
 	}
-	sshArgs = append(sshArgs, input.Args...)
+	sshArgs := []string{"-p", fmt.Sprintf("%d", port)}
 	sshArgs = append(sshArgs, input.Host)
 	if input.Command != "" {
 		sshArgs = append(sshArgs, input.Command)
 	}
 
-	timeout := time.Duration(input.TimeoutSec) * time.Second
+	timeout := time.Duration(input.Timeout) * time.Second
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = 120 * time.Second
 	}
 
 	// Build the ssh command string
@@ -405,7 +422,12 @@ func handleSSHWithSecret(ctx context.Context, dc FullDaemonClient, cfg Config, i
 		return toolError("SSH execution failed: " + err.Error()), SSHWithSecretOutput{}, nil
 	}
 
-	return nil, *result, nil
+	return nil, SSHWithSecretOutput{
+		ExitCode:   result.ExitCode,
+		Stdout:     result.Stdout,
+		Stderr:     result.Stderr,
+		SecretUsed: input.SecretName + "/" + fieldName,
+	}, nil
 }
 
 // --- Helper functions ---
