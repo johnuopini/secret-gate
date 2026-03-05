@@ -377,20 +377,41 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-// HandleClientDownload handles GET /client/{arch}
+// HandleClientDownload handles GET /client/{os}/{arch} and legacy GET /client/{arch}
 func (h *Handler) HandleClientDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		h.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only GET is allowed")
 		return
 	}
 
-	arch := strings.TrimPrefix(r.URL.Path, "/client/")
+	path := strings.TrimPrefix(r.URL.Path, "/client/")
+	parts := strings.Split(path, "/")
+
+	var goos, arch string
+	switch len(parts) {
+	case 1:
+		// Legacy: /client/{arch} — assumes linux
+		goos = "linux"
+		arch = parts[0]
+	case 2:
+		// New: /client/{os}/{arch}
+		goos = parts[0]
+		arch = parts[1]
+	default:
+		h.writeError(w, http.StatusBadRequest, "invalid_path", "Use /client/{os}/{arch} or /client/{arch}")
+		return
+	}
+
+	if goos != "linux" && goos != "darwin" {
+		h.writeError(w, http.StatusBadRequest, "invalid_os", "Supported operating systems: linux, darwin")
+		return
+	}
 	if arch != "amd64" && arch != "arm64" {
 		h.writeError(w, http.StatusBadRequest, "invalid_arch", "Supported architectures: amd64, arm64")
 		return
 	}
 
-	clientPath := "/app/clients/client-" + arch
+	clientPath := "/app/clients/client-" + goos + "-" + arch
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", "attachment; filename=secret-gate")
@@ -827,11 +848,17 @@ func OpenAPISpec() string {
         }
       }
     },
-    "/client/{arch}": {
+    "/client/{os}/{arch}": {
       "get": {
         "summary": "Download CLI client",
-        "description": "Download the pre-compiled CLI client binary for the specified architecture.",
+        "description": "Download the pre-compiled CLI client binary for the specified OS and architecture. Legacy path /client/{arch} is also supported (assumes linux).",
         "parameters": [
+          {
+            "name": "os",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string", "enum": ["linux", "darwin"]}
+          },
           {
             "name": "arch",
             "in": "path",

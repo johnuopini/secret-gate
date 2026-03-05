@@ -129,10 +129,12 @@ The client binary (`secret-gate`) runs on the machine where your AI coding agent
 
 ### From the server
 
-The server hosts pre-compiled client binaries at `/client/{arch}`:
+The server hosts pre-compiled client binaries for Linux and macOS at `/client/{os}/{arch}`:
 
 ```bash
-curl -sL https://your-server/client/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o secret-gate
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+curl -sL "https://your-server/client/${OS}/${ARCH}" -o secret-gate
 chmod +x secret-gate
 sudo mv secret-gate /usr/local/bin/
 ```
@@ -262,7 +264,7 @@ secret-gate daemon stop      # Stop the daemon
 | `POST` | `/request` | None | Request access to one or more secrets (triggers Telegram approval) |
 | `GET` | `/status/{token}` | Token | Check approval status of a pending request |
 | `GET` | `/secret/{token}` | Token | Retrieve the approved secret (one-time use) |
-| `GET` | `/client/{arch}` | None | Download the pre-compiled client binary (`amd64` or `arm64`) |
+| `GET` | `/client/{os}/{arch}` | None | Download the pre-compiled client binary (linux/darwin, amd64/arm64) |
 | `GET` | `/health` | None | Health check |
 | `GET` | `/openapi.json` | None | Full OpenAPI 3.0 specification |
 

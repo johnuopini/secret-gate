@@ -60,6 +60,15 @@ get_server_url() {
   echo "$server_url"
 }
 
+detect_os() {
+  local os
+  os=$(uname -s | tr '[:upper:]' '[:lower:]')
+  case "$os" in
+    linux|darwin) echo "$os" ;;
+    *) echo "Unsupported OS: $os" >&2; exit 1 ;;
+  esac
+}
+
 detect_arch() {
   local arch
   arch=$(uname -m)
@@ -81,11 +90,12 @@ main() {
   local server_url
   server_url=$(get_server_url "$@")
 
-  local arch
+  local os arch
+  os=$(detect_os)
   arch=$(detect_arch)
 
   echo "Server: $server_url"
-  echo "Architecture: $arch"
+  echo "Platform: $os/$arch"
 
   # Create directories
   mkdir -p "$BIN_DIR"
@@ -98,16 +108,16 @@ CONF
   echo "Config saved to $CONFIG_FILE"
 
   # Download binary from server
-  echo "Downloading secret-gate ($arch)..."
+  echo "Downloading secret-gate ($os/$arch)..."
   local http_code
-  http_code=$(curl -sL -w "%{http_code}" -o "$BIN_PATH" "$server_url/client/$arch")
+  http_code=$(curl -sL -w "%{http_code}" -o "$BIN_PATH" "$server_url/client/$os/$arch")
 
   if [[ "$http_code" != "200" ]]; then
     rm -f "$BIN_PATH"
     echo "Server download failed (HTTP $http_code). Trying GitHub Releases..." >&2
 
     # Fallback: try GitHub Releases
-    local github_url="https://github.com/johnuopini/secret-gate/releases/latest/download/secret-gate-${arch}"
+    local github_url="https://github.com/johnuopini/secret-gate/releases/latest/download/secret-gate-${os}-${arch}"
     http_code=$(curl -sL -w "%{http_code}" -o "$BIN_PATH" "$github_url")
 
     if [[ "$http_code" != "200" ]]; then

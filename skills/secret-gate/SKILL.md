@@ -22,8 +22,9 @@ Before any operation, verify the setup:
    - If the setup script is also missing, download the binary directly:
      ```bash
      mkdir -p ~/.config/secret-gate/bin
+     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
      ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-     curl -sL -o ~/.config/secret-gate/bin/secret-gate "<server_url>/client/$ARCH"
+     curl -sL -o ~/.config/secret-gate/bin/secret-gate "<server_url>/client/$OS/$ARCH"
      chmod +x ~/.config/secret-gate/bin/secret-gate
      ```
 
