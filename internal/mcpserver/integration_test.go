@@ -71,7 +71,7 @@ func TestIntegration_FullFlow(t *testing.T) {
 	dc := newMockDaemonClient(true)
 
 	// 3. Create real httpProxyClient pointing to mock server
-	pc := NewHTTPProxyClient(mockServer.URL, dc, 3600, false)
+	pc := NewHTTPProxyClient(mockServer.URL, dc, 3600)
 
 	ctx := context.Background()
 

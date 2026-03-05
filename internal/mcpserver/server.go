@@ -409,7 +409,7 @@ func handleSSHWithSecret(ctx context.Context, dc FullDaemonClient, cfg Config, i
 	if port <= 0 {
 		port = defaultSSHPort
 	}
-	sshArgs := []string{"-p", fmt.Sprintf("%d", port)}
+	sshArgs := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-p", fmt.Sprintf("%d", port)}
 	sshArgs = append(sshArgs, input.Host)
 	if input.Command != "" {
 		sshArgs = append(sshArgs, input.Command)

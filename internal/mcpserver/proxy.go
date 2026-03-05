@@ -28,7 +28,7 @@ type httpProxyClient struct {
 }
 
 // NewHTTPProxyClient creates a ProxyClient that talks to the secret-gate server.
-func NewHTTPProxyClient(serverURL string, dc FullDaemonClient, cacheTTLSec int, sshAgent bool) ProxyClient {
+func NewHTTPProxyClient(serverURL string, dc FullDaemonClient, cacheTTLSec int) ProxyClient {
 	return &httpProxyClient{
 		serverURL:   serverURL,
 		dc:          dc,

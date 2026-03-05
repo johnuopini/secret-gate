@@ -627,7 +627,7 @@ func handleMCPSubcommand() {
 	_ = dc.EnsureRunning()
 
 	// Create proxy client
-	pc := mcpserver.NewHTTPProxyClient(cfg.ServerURL, dc, cacheTTLSec, cfg.SSHAgentIntegration)
+	pc := mcpserver.NewHTTPProxyClient(cfg.ServerURL, dc, cacheTTLSec)
 
 	// Create MCP server config
 	mcpCfg := mcpserver.Config{
