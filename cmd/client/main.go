@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/johnuopini/secret-gate/internal/clientconfig"
 	"github.com/johnuopini/secret-gate/internal/daemon"
+	"github.com/johnuopini/secret-gate/internal/mcpserver"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // RequestPayload is sent to initiate a secret request
@@ -88,9 +91,13 @@ type FieldInfo struct {
 }
 
 func main() {
-	// Check for daemon subcommand before flag parsing
+	// Check for subcommands before flag parsing
 	if len(os.Args) >= 2 && os.Args[1] == "daemon" {
 		handleDaemonSubcommand(os.Args[2:])
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "mcp" {
+		handleMCPSubcommand()
 		return
 	}
 
@@ -126,6 +133,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  Search secrets:  secret-gate --server <url> --search <query>")
 		fmt.Fprintln(os.Stderr, "  Inspect fields:  secret-gate --server <url> --secret <name> --fields")
 		fmt.Fprintln(os.Stderr, "  Daemon control:  secret-gate daemon <start|stop|status|flush>")
+		fmt.Fprintln(os.Stderr, "  MCP server:      secret-gate mcp")
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "Options:")
 		flag.PrintDefaults()
@@ -595,4 +603,47 @@ func getFields(server, secretName, vault string) (*FieldsResponse, error) {
 	}
 
 	return &fieldsResp, nil
+}
+
+// handleMCPSubcommand starts the MCP server with stdio transport.
+func handleMCPSubcommand() {
+	cfg := clientconfig.Load()
+
+	if cfg.ServerURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: server URL is required for MCP mode")
+		fmt.Fprintln(os.Stderr, "Set SECRET_GATE_URL env var or configure server_url in ~/.config/secret-gate/config.json")
+		os.Exit(1)
+	}
+
+	cacheTTLSec := int(cfg.CacheTTL.Seconds())
+	if cacheTTLSec <= 0 {
+		cacheTTLSec = 3600
+	}
+
+	// Create daemon client
+	dc := mcpserver.NewRealDaemonClientWithConfig(cacheTTLSec)
+
+	// Try to ensure daemon is running (non-fatal if it fails)
+	if fdc, ok := dc.(mcpserver.FullDaemonClient); ok {
+		_ = fdc.EnsureRunning()
+	}
+
+	// Create proxy client
+	pc := mcpserver.NewHTTPProxyClient(cfg.ServerURL, dc, cacheTTLSec, cfg.SSHAgentIntegration)
+
+	// Create MCP server config
+	mcpCfg := mcpserver.Config{
+		ServerURL:   cfg.ServerURL,
+		CacheTTLSec: cacheTTLSec,
+		SSHAgent:    cfg.SSHAgentIntegration,
+	}
+
+	// Create and run MCP server
+	server := mcpserver.New(mcpCfg, dc, pc)
+
+	fmt.Fprintln(os.Stderr, "secret-gate MCP server starting (stdio transport)...")
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		fmt.Fprintf(os.Stderr, "MCP server error: %v\n", err)
+		os.Exit(1)
+	}
 }
