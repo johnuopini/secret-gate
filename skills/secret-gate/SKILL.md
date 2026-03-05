@@ -43,6 +43,25 @@ Activate this skill when you:
 - See config files or environment variables referencing credentials you don't have
 - Need to read a private key, certificate, or token file that doesn't exist locally
 
+## MCP Mode (Preferred)
+
+If the `secret-gate` MCP server is available (you'll see `mcp__secret-gate__*` tools), use MCP tools instead of CLI commands. This eliminates Bash approvals and prevents secrets from appearing in the conversation.
+
+### MCP Workflow
+
+1. **Search**: `search_secrets(query="ssh deploy")`
+2. **Inspect**: `inspect_fields(secret_name="my-key")`
+3. **Approve**: `request_secret(secret_name="my-key", field="private_key", reason="deploy to prod")`
+4. **Use (env var)**: `exec_with_secret(secret_name="my-key", field="password", env_var="TOKEN", command="kubectl apply -f deploy.yaml")`
+5. **Use (SSH)**: `ssh_with_secret(secret_name="my-key", host="user@prod", command="systemctl restart app")`
+
+The secret value is never exposed to you — it only exists in the subprocess environment.
+
+### When to Use MCP vs CLI
+
+- **MCP tools available?** Always prefer MCP
+- **MCP not available?** Fall back to the CLI workflow below
+
 ## Caching
 
 The secret-gate client includes a background daemon that caches approved secrets in memory. This means:
