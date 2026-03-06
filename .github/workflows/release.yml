@@ -44,8 +44,21 @@ jobs:
           docker push ghcr.io/johnuopini/secret-gate:${{ github.ref_name }}
           docker push ghcr.io/johnuopini/secret-gate:latest
 
+      - name: Extract changelog
+        id: changelog
+        run: |
+          # Extract the section for the current tag from CHANGELOG.md
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          # Get content between this version header and the next ## header
+          awk "/^## ${VERSION//./\\.}/{found=1; next} /^## v/{if(found) exit} found" CHANGELOG.md > /tmp/release_notes.md
+          # Fallback if no match
+          if [ ! -s /tmp/release_notes.md ]; then
+            echo "Release ${TAG}" > /tmp/release_notes.md
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: /tmp/release_notes.md
           files: dist/*
