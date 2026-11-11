@@ -19,6 +19,7 @@ var vault = []gatetest.Item{
 type secretReply struct {
 	Secret  map[string]string            `json:"secret"`
 	Secrets map[string]map[string]string `json:"secrets"`
+	Session *handlers.SessionGrant       `json:"session"`
 	Error   string                       `json:"error"`
 }
 

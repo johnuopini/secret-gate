@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/johnuopini/secret-gate/internal/config"
 	"github.com/johnuopini/secret-gate/internal/logger"
 	"github.com/johnuopini/secret-gate/internal/models"
 	"github.com/johnuopini/secret-gate/internal/opconnect"
+	"github.com/johnuopini/secret-gate/internal/session"
 	"github.com/johnuopini/secret-gate/internal/store"
 	"github.com/johnuopini/secret-gate/internal/telegram"
 )
@@ -22,11 +24,14 @@ type Notifier interface {
 	UpdateMessageApproved(messageID int, req *models.ApprovalRequest, approver string) error
 	UpdateMessageDenied(messageID int, req *models.ApprovalRequest, denier string) error
 	AnswerCallbackQuery(callbackID, text string) error
+	SendSessionRelease(req *models.ApprovalRequest) (int, error)
+	SendSessionEnded(machine, endedBy string) error
 }
 
 // Handler holds dependencies for HTTP handlers
 type Handler struct {
 	store    *store.Store
+	sessions *session.Store
 	opClient *opconnect.Client
 	notifier Notifier
 	config   *config.Config
@@ -34,9 +39,10 @@ type Handler struct {
 }
 
 // New creates a new Handler
-func New(s *store.Store, op *opconnect.Client, notifier Notifier, cfg *config.Config) *Handler {
+func New(s *store.Store, sessions *session.Store, op *opconnect.Client, notifier Notifier, cfg *config.Config) *Handler {
 	return &Handler{
 		store:    s,
+		sessions: sessions,
 		opClient: op,
 		notifier: notifier,
 		config:   cfg,
@@ -100,6 +106,11 @@ type BatchRequestPayload struct {
 	// Common fields
 	Machine string `json:"machine"`
 	Reason  string `json:"reason,omitempty"`
+	// Session says the client can hold an approval window, so the approver
+	// may be offered one.
+	Session bool `json:"session,omitempty"`
+	// SessionToken is the token of the approval window the client holds.
+	SessionToken string `json:"session_token,omitempty"`
 }
 
 // RequestResponse is the response for a new secret request
@@ -108,6 +119,16 @@ type RequestResponse struct {
 	StatusURL string `json:"status_url"`
 	ExpiresAt string `json:"expires_at"`
 	Message   string `json:"message"`
+	// SessionInvalid tells the client the window token it presented no longer
+	// releases anything, so it should forget it.
+	SessionInvalid bool `json:"session_invalid,omitempty"`
+}
+
+// SessionGrant is the approval window handed to the client with the secret
+// whose approval opened it.
+type SessionGrant struct {
+	Token     string `json:"token"`
+	ExpiresAt string `json:"expires_at"` // RFC 3339
 }
 
 // StatusResponse is the response for status checks
@@ -119,12 +140,14 @@ type StatusResponse struct {
 
 // SecretResponse is the response containing the secret
 type SecretResponse struct {
-	Secret map[string]string `json:"secret"`
+	Secret  map[string]string `json:"secret"`
+	Session *SessionGrant     `json:"session,omitempty"`
 }
 
 // BatchSecretResponse is the response containing multiple secrets
 type BatchSecretResponse struct {
 	Secrets map[string]map[string]string `json:"secrets"`
+	Session *SessionGrant                `json:"session,omitempty"`
 }
 
 // ErrorResponse is returned on errors
@@ -190,6 +213,23 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 	// Attach batch secrets to the request
 	req.Secrets = secrets
 
+	// A live approval window for this machine releases the request without
+	// asking again. Any other token is reported back so the client drops it.
+	var sessionInvalid bool
+	if payload.SessionToken != "" {
+		sess, ok := h.sessions.Lookup(payload.SessionToken)
+		if ok && sess.Machine == payload.Machine {
+			h.releaseUnderSession(w, req, sess)
+			return
+		}
+		sessionInvalid = true
+	}
+
+	// Offer a window only to a client that can hold one and says who it is.
+	if payload.Session && payload.Machine != "" && h.config.SessionTTL > 0 {
+		req.SessionTTL = h.config.SessionTTL
+	}
+
 	// Save to store
 	if err := h.store.Save(req); err != nil {
 		h.log.Error("Failed to save request", logger.F("error", err.Error(), "request_id", req.ID))
@@ -221,13 +261,68 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := RequestResponse{
-		Token:     req.Token,
-		StatusURL: baseURL + "/status/" + req.Token,
-		ExpiresAt: req.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"),
-		Message:   "Request submitted. Waiting for human approval via Telegram. Poll the status_url to check approval status.",
+		Token:          req.Token,
+		StatusURL:      baseURL + "/status/" + req.Token,
+		ExpiresAt:      req.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"),
+		Message:        "Request submitted. Waiting for human approval via Telegram. Poll the status_url to check approval status.",
+		SessionInvalid: sessionInvalid,
 	}
 
 	h.writeJSON(w, http.StatusAccepted, resp)
+}
+
+// releaseUnderSession approves req under an open approval window. The approver
+// is told first: a release that cannot be reported does not happen.
+func (h *Handler) releaseUnderSession(w http.ResponseWriter, req *models.ApprovalRequest, sess session.Session) {
+	baseURL := h.config.WebhookBaseURL
+	if baseURL == "" {
+		h.writeError(w, http.StatusInternalServerError, "config_error", "WEBHOOK_BASE_URL not configured")
+		return
+	}
+
+	req.Approve()
+	req.SessionID = sess.ID
+	req.SessionExpiresAt = sess.ExpiresAt
+
+	msgID, err := h.notifier.SendSessionRelease(req)
+	if err != nil {
+		h.log.Error("Failed to report release under approval window", logger.F("error", err.Error(), "request_id", req.ID))
+		h.writeError(w, http.StatusServiceUnavailable, "notify_failed", "Could not notify the approver, so nothing was released. Try again.")
+		return
+	}
+	req.TelegramMsgID = msgID
+
+	if err := h.store.Save(req); err != nil {
+		h.log.Error("Failed to save request", logger.F("error", err.Error(), "request_id", req.ID))
+		h.writeError(w, http.StatusInternalServerError, "internal_error", "Failed to save request")
+		return
+	}
+
+	h.log.Info("Released request under approval window", logger.F(
+		"request_id", req.ID,
+		"session_id", sess.ID,
+		"secrets_count", len(req.Secrets),
+		"machine", req.RequesterMachine,
+		"requester_ip", req.RequesterIP,
+	))
+
+	h.writeJSON(w, http.StatusAccepted, RequestResponse{
+		Token:     req.Token,
+		StatusURL: baseURL + "/status/" + req.Token,
+		ExpiresAt: req.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"),
+		Message:   "Request released under an open approval window. Poll the status_url to retrieve the secret.",
+	})
+}
+
+// sessionGrant returns the approval window req opened, for the client to keep.
+func sessionGrant(req *models.ApprovalRequest) *SessionGrant {
+	if req.SessionToken == "" {
+		return nil
+	}
+	return &SessionGrant{
+		Token:     req.SessionToken,
+		ExpiresAt: req.SessionExpiresAt.Format(time.RFC3339),
+	}
 }
 
 // HandleStatus handles GET /status/{token}
@@ -363,7 +458,7 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 
 		h.log.Info("Batch secrets retrieved", logger.F("request_id", req.ID, "count", len(result)))
 		h.store.Delete(token)
-		h.writeJSON(w, http.StatusOK, BatchSecretResponse{Secrets: result})
+		h.writeJSON(w, http.StatusOK, BatchSecretResponse{Secrets: result, Session: sessionGrant(req)})
 		return
 	}
 
@@ -391,15 +486,25 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 
 	h.log.Info("Secret retrieved", logger.F("request_id", req.ID, "secret", actualSecret, "vault", actualVault))
 	h.store.Delete(token)
-	h.writeJSON(w, http.StatusOK, SecretResponse{Secret: secret})
+	h.writeJSON(w, http.StatusOK, SecretResponse{Secret: secret, Session: sessionGrant(req)})
 }
 
 // HandleCallback acts on a button the approver pressed. The button's data is
-// "<action>:<request ID>".
+// "<action>:<request ID>", or "endsession:<session ID>".
 func (h *Handler) HandleCallback(callback *telegram.CallbackQuery) {
 	action, requestID, ok := strings.Cut(callback.Data, ":")
 	if !ok {
 		h.notifier.AnswerCallbackQuery(callback.ID, "Invalid callback data")
+		return
+	}
+
+	approver := callback.From.Username
+	if approver == "" {
+		approver = callback.From.FirstName
+	}
+
+	if action == "endsession" {
+		h.endSession(callback.ID, requestID, approver)
 		return
 	}
 
@@ -414,17 +519,46 @@ func (h *Handler) HandleCallback(callback *telegram.CallbackQuery) {
 		return
 	}
 
+	if req.Status == models.StatusExpired || (req.Status == models.StatusPending && req.IsExpired()) {
+		h.notifier.AnswerCallbackQuery(callback.ID, "Request expired")
+		return
+	}
+
 	if req.Status != models.StatusPending {
 		h.notifier.AnswerCallbackQuery(callback.ID, "Request already processed")
 		return
 	}
 
-	approver := callback.From.Username
-	if approver == "" {
-		approver = callback.From.FirstName
-	}
-
 	switch action {
+	case "session":
+		if req.SessionTTL <= 0 {
+			h.notifier.AnswerCallbackQuery(callback.ID, "Unknown action")
+			return
+		}
+		token, sess, err := h.sessions.Create(req.RequesterMachine, req.SessionTTL)
+		if err != nil {
+			h.log.Error("Error opening approval window", logger.F("error", err.Error(), "request_id", req.ID))
+			h.notifier.AnswerCallbackQuery(callback.ID, "Internal error")
+			return
+		}
+		req.SessionToken = token
+		req.SessionID = sess.ID
+		req.SessionExpiresAt = sess.ExpiresAt
+		req.Approve()
+		if err := h.store.Update(req); err != nil {
+			h.log.Error("Error updating request", logger.F("error", err.Error(), "request_id", req.ID))
+		}
+		h.notifier.AnswerCallbackQuery(callback.ID, "Approved, window open")
+		if req.TelegramMsgID != 0 {
+			h.notifier.UpdateMessageApproved(req.TelegramMsgID, req, approver)
+		}
+		h.log.Info("Request approved, approval window opened", logger.F(
+			"request_id", req.ID,
+			"session_id", sess.ID,
+			"machine", req.RequesterMachine,
+			"approver", approver,
+		))
+
 	case "approve":
 		req.Approve()
 		if err := h.store.Update(req); err != nil {
@@ -450,6 +584,22 @@ func (h *Handler) HandleCallback(callback *telegram.CallbackQuery) {
 	default:
 		h.notifier.AnswerCallbackQuery(callback.ID, "Unknown action")
 	}
+}
+
+// endSession closes an approval window, and with it every other window of the
+// same machine.
+func (h *Handler) endSession(callbackID, sessionID, endedBy string) {
+	machine, ended := h.sessions.End(sessionID)
+	if ended == 0 {
+		h.notifier.AnswerCallbackQuery(callbackID, "Approval window already ended")
+		return
+	}
+
+	h.notifier.AnswerCallbackQuery(callbackID, "Approval window ended")
+	if err := h.notifier.SendSessionEnded(machine, endedBy); err != nil {
+		h.log.Error("Failed to report approval window end", logger.F("error", err.Error(), "session_id", sessionID))
+	}
+	h.log.Info("Approval window ended", logger.F("session_id", sessionID, "machine", machine, "windows", ended, "ended_by", endedBy))
 }
 
 // HandleHealth handles GET /health

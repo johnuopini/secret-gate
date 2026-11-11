@@ -5,6 +5,7 @@ package gatetest
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"github.com/johnuopini/secret-gate/internal/handlers"
 	"github.com/johnuopini/secret-gate/internal/models"
 	"github.com/johnuopini/secret-gate/internal/opconnect"
+	"github.com/johnuopini/secret-gate/internal/session"
 	"github.com/johnuopini/secret-gate/internal/store"
 	"github.com/johnuopini/secret-gate/internal/telegram"
 )
@@ -50,6 +52,7 @@ func Start(t *testing.T, items []Item, options ...func(*config.Config)) *Gate {
 
 	cfg := &config.Config{
 		RequestTTL:     15 * time.Minute,
+		SessionTTL:     8 * time.Hour,
 		WebhookBaseURL: srv.URL,
 	}
 	for _, option := range options {
@@ -57,7 +60,7 @@ func Start(t *testing.T, items []Item, options ...func(*config.Config)) *Gate {
 	}
 
 	notifier := &Notifier{}
-	handler := handlers.New(store.New(), fakeConnect(t, items), notifier, cfg)
+	handler := handlers.New(store.New(), session.NewStore(), fakeConnect(t, items), notifier, cfg)
 	handler.Register(mux)
 
 	return &Gate{URL: srv.URL, Notifier: notifier, handler: handler}
@@ -76,11 +79,35 @@ func (g *Gate) Tap(data string) string {
 
 // Notifier stands in for the Telegram chat and records what was sent to it.
 type Notifier struct {
-	mu       sync.Mutex
-	prompts  []models.ApprovalRequest
-	approved []models.ApprovalRequest
-	denied   []models.ApprovalRequest
-	answers  []string
+	mu           sync.Mutex
+	prompts      []models.ApprovalRequest
+	releases     []models.ApprovalRequest
+	approved     []models.ApprovalRequest
+	denied       []models.ApprovalRequest
+	ended        []string
+	answers      []string
+	failReleases bool
+}
+
+// FailReleases makes every later release notice fail to send.
+func (n *Notifier) FailReleases() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.failReleases = true
+}
+
+// Releases returns the requests reported as released under an approval window.
+func (n *Notifier) Releases() []models.ApprovalRequest {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]models.ApprovalRequest(nil), n.releases...)
+}
+
+// Ended returns the machines whose approval windows were reported as ended.
+func (n *Notifier) Ended() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]string(nil), n.ended...)
 }
 
 // Prompts returns the approval requests the approver was asked about.
@@ -119,6 +146,25 @@ func (n *Notifier) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseU
 	defer n.mu.Unlock()
 	n.prompts = append(n.prompts, *req)
 	return len(n.prompts), nil
+}
+
+// SendSessionRelease implements handlers.Notifier.
+func (n *Notifier) SendSessionRelease(req *models.ApprovalRequest) (int, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.failReleases {
+		return 0, errors.New("telegram is unreachable")
+	}
+	n.releases = append(n.releases, *req)
+	return len(n.releases), nil
+}
+
+// SendSessionEnded implements handlers.Notifier.
+func (n *Notifier) SendSessionEnded(machine, endedBy string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.ended = append(n.ended, machine)
+	return nil
 }
 
 // UpdateMessageApproved implements handlers.Notifier.

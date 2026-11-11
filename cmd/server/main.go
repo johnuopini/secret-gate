@@ -8,6 +8,7 @@ import (
 	"github.com/johnuopini/secret-gate/internal/handlers"
 	"github.com/johnuopini/secret-gate/internal/logger"
 	"github.com/johnuopini/secret-gate/internal/opconnect"
+	"github.com/johnuopini/secret-gate/internal/session"
 	"github.com/johnuopini/secret-gate/internal/store"
 	"github.com/johnuopini/secret-gate/internal/telegram"
 )
@@ -31,7 +32,8 @@ func main() {
 	tgClient := telegram.New(cfg.TelegramBotToken, cfg.TelegramChatID)
 
 	// Create HTTP handler
-	h := handlers.New(requestStore, opClient, tgClient, cfg)
+	sessionStore := session.NewStore()
+	h := handlers.New(requestStore, sessionStore, opClient, tgClient, cfg)
 
 	// Set up routes
 	mux := http.NewServeMux()
@@ -48,6 +50,9 @@ func main() {
 		for range ticker.C {
 			if removed := requestStore.Cleanup(); removed > 0 {
 				log.Info("Cleaned up expired requests", logger.F("removed", removed))
+			}
+			if removed := sessionStore.Cleanup(); removed > 0 {
+				log.Info("Cleaned up expired approval windows", logger.F("removed", removed))
 			}
 		}
 	}()
