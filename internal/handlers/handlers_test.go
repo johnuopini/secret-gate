@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/johnuopini/secret-gate/internal/gatetest"
 	"github.com/johnuopini/secret-gate/internal/handlers"
+	"github.com/johnuopini/secret-gate/internal/models"
 )
 
 var vault = []gatetest.Item{
@@ -143,6 +145,51 @@ func TestRequest_WhenTheApproverCannotBeAsked_IsRefused(t *testing.T) {
 	}
 	if reply.Token != "" {
 		t.Error("gate handed out a request token that no one was asked to approve")
+	}
+}
+
+func TestRequest_NamingTheSameSecretTwice_IsRefused(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+
+	code, reply := ask(t, gate, handlers.BatchRequestPayload{
+		Secrets: []models.SecretRequest{
+			{SecretName: "db", Vault: "Private"},
+			{SecretName: "db", Vault: "Shared"},
+		},
+		Machine: "devvm",
+		Reason:  "test",
+	})
+
+	if code != http.StatusBadRequest {
+		t.Errorf("POST /request = %d, want %d", code, http.StatusBadRequest)
+	}
+	if !strings.Contains(reply.Message, `"db"`) {
+		t.Errorf("message = %q, want it to name the secret asked for twice", reply.Message)
+	}
+	if reply.Token != "" || len(gate.Notifier.Prompts()) != 0 {
+		t.Error("the approver was asked about a request whose reply would hold only one of the two")
+	}
+}
+
+func TestApprove_BatchWhoseNamesFindTheSameItem_ReleasesNothing(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	_, reply := ask(t, gate, handlers.BatchRequestPayload{
+		Secrets: []models.SecretRequest{
+			{SecretName: "llm-proxy", Fields: []string{"username"}},
+			{SecretName: "llm", Fields: []string{"password"}},
+		},
+		Machine: "devvm",
+		Reason:  "test",
+	})
+	gate.Tap("approve:" + onlyPromptID(t, gate))
+
+	code, secret := retrieve(t, gate, reply.Token)
+
+	if code != http.StatusInternalServerError || secret.Error != "secret_fetch_failed" {
+		t.Fatalf("GET /secret = %d %q with %v, want 500 secret_fetch_failed", code, secret.Error, secret.Secrets)
+	}
+	if !strings.Contains(secret.Message, `"llm-proxy"`) {
+		t.Errorf("message = %q, want it to name the item found twice", secret.Message)
 	}
 }
 

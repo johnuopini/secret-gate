@@ -17,6 +17,7 @@
 - A request whose Telegram prompt cannot be sent now fails at once with `503 notify_failed` instead of waiting until it expires.
 - `OP_CONNECT_HOST` with a trailing slash no longer produces `//v1/...` paths that Connect rejects.
 - **Telegram messages are sent as HTML** with every value from the requester escaped. Before, a backtick in a secret name, machine name or the forwarded IP could end its code span and change what the approver read.
+- A batch request that names the same secret twice is refused with `400 duplicate_secret`, and one whose names find the same item fails at retrieval. Before, the reply, which is keyed by name, silently kept only one of them.
 
 ## v0.2.1 — Cross-Platform & SSH Fixes
 

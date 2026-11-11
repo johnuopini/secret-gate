@@ -183,6 +183,17 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The batch reply is keyed by name, so a name asked for twice would hand
+	// back only one of the two.
+	named := make(map[string]bool, len(secrets))
+	for _, s := range secrets {
+		if named[s.SecretName] {
+			h.writeError(w, http.StatusBadRequest, "duplicate_secret", fmt.Sprintf("secrets[] names %q more than once. The reply is keyed by name, so ask for each name once, or send one request per vault.", s.SecretName))
+			return
+		}
+		named[s.SecretName] = true
+	}
+
 	// Use the first secret's name for the approval request label
 	primaryName := secrets[0].SecretName
 	primaryVault := secrets[0].Vault
@@ -459,6 +470,14 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				actualName = s.SecretName
+			}
+
+			// Two names that differ can still find the same item, and
+			// the reply would then keep only one of them.
+			if _, taken := result[actualName]; taken {
+				h.log.Error("Two requested names found the same item", logger.F("request_id", req.ID, "secret", s.SecretName, "item", actualName))
+				h.fetchFailed(w, req, fmt.Sprintf("Failed to retrieve %s: it finds %q, which this request already holds. Ask for %q once, with all the fields you need.", s.SecretName, actualName, actualName))
+				return
 			}
 
 			// Filter fields if specified
@@ -953,6 +972,9 @@ func OpenAPISpec() string {
                 }
               }
             }
+          },
+          "400": {
+            "description": "The payload is not valid JSON, names no secret, or names the same secret more than once in 'secrets' (error 'duplicate_secret'). The batch reply is keyed by secret name, so each name may appear once."
           },
           "503": {
             "description": "The approver could not be reached on Telegram, so the request was not created (or, under an open approval window, nothing was released). Try again."
