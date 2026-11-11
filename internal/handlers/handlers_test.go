@@ -21,6 +21,7 @@ type secretReply struct {
 	Secrets map[string]map[string]string `json:"secrets"`
 	Session *handlers.SessionGrant       `json:"session"`
 	Error   string                       `json:"error"`
+	Message string                       `json:"message"`
 }
 
 // ask submits a secret request and returns the HTTP status and the reply.

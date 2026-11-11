@@ -45,6 +45,7 @@ type ApprovalRequest struct {
 	SessionToken     string        `json:"-"` // token of the window this request opened, until retrieved
 	SessionID        string        `json:"-"` // window this request opened or was released under
 	SessionExpiresAt time.Time     `json:"-"`
+	SessionReleased  bool          `json:"-"` // approved by an open window, not by a tap on this request
 }
 
 // SecretValue holds the retrieved secret data

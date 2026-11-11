@@ -304,6 +304,7 @@ func (h *Handler) releaseUnderSession(w http.ResponseWriter, req *models.Approva
 	}
 
 	req.Approve()
+	req.SessionReleased = true
 	req.TelegramMsgID = msgID
 
 	if err := h.store.Save(req); err != nil {
@@ -440,7 +441,7 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 
 			if vault == "_auto_" {
 				var err error
-				allFields, _, actualName, err = h.opClient.FindSecretAcrossVaults(s.SecretName)
+				allFields, _, actualName, err = h.findAcrossVaults(req, s.SecretName)
 				if err != nil {
 					h.log.Error("Failed to find secret", logger.F("error", err.Error(), "secret", s.SecretName))
 					h.fetchFailed(w, req, fmt.Sprintf("Failed to retrieve %s: %s", s.SecretName, err.Error()))
@@ -482,7 +483,7 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 	var actualVault, actualSecret string
 
 	if req.Vault == "_auto_" {
-		secret, actualVault, actualSecret, err = h.opClient.FindSecretAcrossVaults(req.SecretName)
+		secret, actualVault, actualSecret, err = h.findAcrossVaults(req, req.SecretName)
 		if err != nil {
 			h.log.Error("Failed to find secret across vaults", logger.F("error", err.Error(), "request_id", req.ID, "secret", req.SecretName))
 			h.fetchFailed(w, req, err.Error())
@@ -502,6 +503,25 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("Secret retrieved", logger.F("request_id", req.ID, "secret", actualSecret, "vault", actualVault))
 	h.store.Delete(token)
 	h.writeJSON(w, http.StatusOK, SecretResponse{Secret: secret, Session: sessionGrant(req)})
+}
+
+// findAcrossVaults looks up a secret that was requested without a vault, and
+// returns its fields, its vault and its title.
+//
+// A request the approver tapped on may settle for a close match, as it always
+// has. A request released under an approval window was only reported, under
+// the name the client gave, so it gets the one item titled exactly that or
+// nothing.
+func (h *Handler) findAcrossVaults(req *models.ApprovalRequest, name string) (map[string]string, string, string, error) {
+	if !req.SessionReleased {
+		return h.opClient.FindSecretAcrossVaults(name)
+	}
+
+	fields, vault, err := h.opClient.FindExactSecretAcrossVaults(name)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("under an approval window a secret must be named by its exact title: %w", err)
+	}
+	return fields, vault, name, nil
 }
 
 // fetchFailed answers a secret retrieval that 1Password did not satisfy.
@@ -884,7 +904,7 @@ func OpenAPISpec() string {
                   },
                   "session_token": {
                     "type": "string",
-                    "description": "Token of the approval window the client holds. If the window is open and was granted to the same 'machine', the request is approved at once and reported to the approver."
+                    "description": "Token of the approval window the client holds. If the window is open and was granted to the same 'machine', the request is approved at once and reported to the approver. A secret requested without a vault is then handed out only if exactly one item has exactly that title."
                   }
                 }
               },

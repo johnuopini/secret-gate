@@ -371,6 +371,80 @@ func TestSecret_ThatCannotBeFetched_ClosesTheWindowItsApprovalOpened(t *testing.
 	}
 }
 
+func TestRequest_UnderAWindow_WithoutAVault_ReleasesTheItemTitledExactlyThat(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	windowToken := openWindow(t, gate)
+
+	_, reply := ask(t, gate, handlers.BatchRequestPayload{
+		SecretName:   "db",
+		Machine:      "devvm",
+		Session:      true,
+		SessionToken: windowToken,
+	})
+
+	code, secret := retrieve(t, gate, reply.Token)
+	if code != http.StatusOK || secret.Secret["password"] != "db-pass" {
+		t.Fatalf("GET /secret = %d with password %q, want 200 with the item's password", code, secret.Secret["password"])
+	}
+}
+
+func TestRequest_UnderAWindow_WithoutAVault_NamingAnItemOnlyClosely_ReleasesNothing(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	windowToken := openWindow(t, gate)
+
+	_, reply := ask(t, gate, handlers.BatchRequestPayload{
+		SecretName:   "llm",
+		Machine:      "devvm",
+		Session:      true,
+		SessionToken: windowToken,
+	})
+	if got := statusOf(t, gate, reply.Token); got != "approved" {
+		t.Fatalf("status = %q, want the request released under the window", got)
+	}
+
+	code, secret := retrieve(t, gate, reply.Token)
+
+	if code != http.StatusInternalServerError || secret.Error != "secret_fetch_failed" {
+		t.Fatalf("GET /secret = %d %q, want 500 secret_fetch_failed", code, secret.Error)
+	}
+	if len(secret.Secret) != 0 {
+		t.Errorf("the approver was told llm was released, and the client got llm-proxy: %v", secret.Secret)
+	}
+	if !strings.Contains(secret.Message, `"llm-proxy"`) {
+		t.Errorf("message = %q, want it to name the exact title to ask for", secret.Message)
+	}
+}
+
+func TestRequest_UnderAWindow_BatchWithoutAVault_NamingAnItemOnlyClosely_ReleasesNothing(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	windowToken := openWindow(t, gate)
+
+	_, reply := ask(t, gate, handlers.BatchRequestPayload{
+		Secrets: []models.SecretRequest{
+			{SecretName: "db"},
+			{SecretName: "llm", Fields: []string{"password"}},
+		},
+		Machine:      "devvm",
+		Session:      true,
+		SessionToken: windowToken,
+	})
+	if got := statusOf(t, gate, reply.Token); got != "approved" {
+		t.Fatalf("status = %q, want the request released under the window", got)
+	}
+
+	code, secret := retrieve(t, gate, reply.Token)
+
+	if code != http.StatusInternalServerError || secret.Error != "secret_fetch_failed" {
+		t.Fatalf("GET /secret = %d %q, want 500 secret_fetch_failed", code, secret.Error)
+	}
+	if len(secret.Secrets) != 0 {
+		t.Errorf("the approver was told llm was released, and the client got: %v", secret.Secrets)
+	}
+	if !strings.Contains(secret.Message, `"llm-proxy"`) {
+		t.Errorf("message = %q, want it to name the exact title to ask for", secret.Message)
+	}
+}
+
 func TestEndWindowTap_OnAWindowAlreadyEnded_SaysSo(t *testing.T) {
 	gate := gatetest.Start(t, vault)
 	openWindow(t, gate)

@@ -403,6 +403,70 @@ func (c *Client) FindSecretAcrossVaults(secretName string) (map[string]string, s
 	return fields, best.VaultName, best.Item.Title, nil
 }
 
+// FindExactSecretAcrossVaults returns the fields and the vault name of the one
+// item, across all vaults, whose title is exactly title. Unlike
+// FindSecretAcrossVaults it never settles for a close match, and it returns
+// nothing unless it has seen every vault and found the title only once.
+func (c *Client) FindExactSecretAcrossVaults(title string) (map[string]string, string, error) {
+	vaults, err := c.GetVaults()
+	if err != nil {
+		return nil, "", fmt.Errorf("listing vaults: %w", err)
+	}
+
+	type match struct {
+		vault  Vault
+		itemID string
+	}
+	var matches []match
+	var closest string
+	var closestScore float64
+	titleLower := strings.ToLower(title)
+
+	for _, vault := range vaults {
+		items, err := c.ListItemsInVault(vault.ID)
+		if err != nil {
+			return nil, "", fmt.Errorf("listing vault %q: %w", vault.Name, err)
+		}
+
+		for _, item := range items {
+			if item.Title == title {
+				matches = append(matches, match{vault: vault, itemID: item.ID})
+				continue
+			}
+			if score, _ := fuzzyScore(titleLower, strings.ToLower(item.Title)); score > closestScore {
+				closest, closestScore = item.Title, score
+			}
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		if closest != "" {
+			return nil, "", fmt.Errorf("no item is titled exactly %q; the closest is %q", title, closest)
+		}
+		return nil, "", fmt.Errorf("no item is titled exactly %q", title)
+	case 1:
+		item, err := c.GetItem(matches[0].vault.ID, matches[0].itemID)
+		if err != nil {
+			return nil, "", fmt.Errorf("getting item: %w", err)
+		}
+
+		fields := make(map[string]string)
+		for _, f := range item.Fields {
+			if f.Label != "" {
+				fields[f.Label] = f.Value
+			}
+		}
+		return fields, matches[0].vault.Name, nil
+	default:
+		in := make([]string, len(matches))
+		for i, m := range matches {
+			in[i] = m.vault.Name
+		}
+		return nil, "", fmt.Errorf("%d items are titled %q (in %s), so the title does not say which one to fetch", len(matches), title, strings.Join(in, ", "))
+	}
+}
+
 // fuzzyScore calculates a match score between query and target
 // Returns score (0-1) and match type
 func fuzzyScore(query, target string) (float64, string) {

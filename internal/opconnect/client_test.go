@@ -13,56 +13,83 @@ import (
 // filterClause is one `title eq "..."` term of a Connect item filter.
 var filterClause = regexp.MustCompile(`^title eq "(.*)"$`)
 
-// fakeConnect serves one vault ("HomeLab") holding one item per given title,
-// answering the same routes 1Password Connect does. Item N has the ID
-// "item-N" and the password "s3cret-N".
-//
-// Like Connect, it reads the items filter as `title eq "..."` terms joined by
-// "or", and lists every item when there is no filter.
+// fakeVault is one vault of the fake Connect.
+type fakeVault struct {
+	name       string
+	titles     []string
+	unreadable bool // listing its items fails
+}
+
+// fakeConnect serves one vault ("HomeLab") holding one item per given title.
 func fakeConnect(t *testing.T, titles ...string) *Client {
 	t.Helper()
 
-	items := make([]Item, len(titles))
-	for i, title := range titles {
-		items[i] = Item{
-			ID:    fmt.Sprintf("item-%d", i+1),
-			Title: title,
-			Fields: []Field{
-				{ID: "f1", Type: "STRING", Label: "username", Value: "deploy"},
-				{ID: "f2", Type: "CONCEALED", Label: "password", Value: fmt.Sprintf("s3cret-%d", i+1)},
-			},
-		}
-	}
+	return fakeConnectVaults(t, fakeVault{name: "HomeLab", titles: titles})
+}
+
+// fakeConnectVaults serves the given vaults over the same routes 1Password
+// Connect answers. Items are numbered across the vaults in the order given:
+// item N has the ID "item-N" and the password "s3cret-N".
+//
+// Like Connect, it reads the items filter as `title eq "..."` terms joined by
+// "or", and lists every item of a vault when there is no filter.
+func fakeConnectVaults(t *testing.T, vaults ...fakeVault) *Client {
+	t.Helper()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/vaults", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]Vault{{ID: "vault-1", Name: "HomeLab"}})
-	})
-	mux.HandleFunc("GET /v1/vaults/vault-1/items", func(w http.ResponseWriter, r *http.Request) {
-		wanted := map[string]bool{}
-		filter := r.URL.Query().Get("filter")
-		for _, clause := range strings.Split(filter, " or ") {
-			if m := filterClause.FindStringSubmatch(clause); m != nil {
-				wanted[m[1]] = true
+	listed := make([]Vault, len(vaults))
+	n := 0
+	for v, vault := range vaults {
+		id := fmt.Sprintf("vault-%d", v+1)
+		listed[v] = Vault{ID: id, Name: vault.name}
+
+		items := make([]Item, len(vault.titles))
+		for i, title := range vault.titles {
+			n++
+			items[i] = Item{
+				ID:    fmt.Sprintf("item-%d", n),
+				Title: title,
+				Fields: []Field{
+					{ID: "f1", Type: "STRING", Label: "username", Value: "deploy"},
+					{ID: "f2", Type: "CONCEALED", Label: "password", Value: fmt.Sprintf("s3cret-%d", n)},
+				},
 			}
 		}
 
-		matches := []Item{}
-		for _, item := range items {
-			if filter == "" || wanted[item.Title] {
-				matches = append(matches, Item{ID: item.ID, Title: item.Title})
-			}
-		}
-		json.NewEncoder(w).Encode(matches)
-	})
-	mux.HandleFunc("GET /v1/vaults/vault-1/items/{id}", func(w http.ResponseWriter, r *http.Request) {
-		for _, item := range items {
-			if item.ID == r.PathValue("id") {
-				json.NewEncoder(w).Encode(item)
+		mux.HandleFunc("GET /v1/vaults/"+id+"/items", func(w http.ResponseWriter, r *http.Request) {
+			if vault.unreadable {
+				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
-		}
-		http.NotFound(w, r)
+
+			wanted := map[string]bool{}
+			filter := r.URL.Query().Get("filter")
+			for _, clause := range strings.Split(filter, " or ") {
+				if m := filterClause.FindStringSubmatch(clause); m != nil {
+					wanted[m[1]] = true
+				}
+			}
+
+			matches := []Item{}
+			for _, item := range items {
+				if filter == "" || wanted[item.Title] {
+					matches = append(matches, Item{ID: item.ID, Title: item.Title})
+				}
+			}
+			json.NewEncoder(w).Encode(matches)
+		})
+		mux.HandleFunc("GET /v1/vaults/"+id+"/items/{id}", func(w http.ResponseWriter, r *http.Request) {
+			for _, item := range items {
+				if item.ID == r.PathValue("id") {
+					json.NewEncoder(w).Encode(item)
+					return
+				}
+			}
+			http.NotFound(w, r)
+		})
+	}
+	mux.HandleFunc("GET /v1/vaults", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(listed)
 	})
 
 	srv := httptest.NewServer(mux)
@@ -164,5 +191,69 @@ func TestGetSecret_NoItemWithThatTitle_IsNotFound(t *testing.T) {
 	_, err := client.GetSecret("HomeLab", "llm")
 	if err == nil || !strings.Contains(err.Error(), "item not found") {
 		t.Errorf("error = %v, want item not found", err)
+	}
+}
+
+func TestFindExactSecretAcrossVaults_ReturnsTheOneItemWithThatTitle(t *testing.T) {
+	client := fakeConnectVaults(t,
+		fakeVault{name: "HomeLab", titles: []string{"llm-proxy"}},
+		fakeVault{name: "Kustom", titles: []string{"db"}},
+	)
+
+	secret, vault, err := client.FindExactSecretAcrossVaults("db")
+	if err != nil {
+		t.Fatalf("FindExactSecretAcrossVaults: %v", err)
+	}
+	if vault != "Kustom" || secret["password"] != "s3cret-2" {
+		t.Errorf("found password %q in vault %q, want s3cret-2 in Kustom", secret["password"], vault)
+	}
+}
+
+func TestFindExactSecretAcrossVaults_NameThatOnlyComesClose_ReturnsNothingAndNamesTheItem(t *testing.T) {
+	client := fakeConnectVaults(t,
+		fakeVault{name: "HomeLab", titles: []string{"db"}},
+		fakeVault{name: "Kustom", titles: []string{"llm-proxy"}},
+	)
+
+	for _, name := range []string{"llm", "LLM-Proxy"} {
+		secret, _, err := client.FindExactSecretAcrossVaults(name)
+		if err == nil {
+			t.Fatalf("FindExactSecretAcrossVaults(%q) settled for another item: %v", name, secret)
+		}
+		if !strings.Contains(err.Error(), `"llm-proxy"`) {
+			t.Errorf("error for %q = %v, want it to name llm-proxy as the closest title", name, err)
+		}
+	}
+}
+
+func TestFindExactSecretAcrossVaults_SameTitleInTwoVaults_ReturnsNeither(t *testing.T) {
+	client := fakeConnectVaults(t,
+		fakeVault{name: "HomeLab", titles: []string{"db"}},
+		fakeVault{name: "Kustom", titles: []string{"db"}},
+	)
+
+	secret, _, err := client.FindExactSecretAcrossVaults("db")
+	if err == nil {
+		t.Fatalf("FindExactSecretAcrossVaults picked one of two items titled db: %v", secret)
+	}
+	for _, want := range []string{"2 items", "HomeLab", "Kustom"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
+		}
+	}
+}
+
+func TestFindExactSecretAcrossVaults_AVaultThatCannotBeListed_ReturnsNothing(t *testing.T) {
+	client := fakeConnectVaults(t,
+		fakeVault{name: "HomeLab", titles: []string{"db"}},
+		fakeVault{name: "Kustom", unreadable: true},
+	)
+
+	secret, _, err := client.FindExactSecretAcrossVaults("db")
+	if err == nil {
+		t.Fatalf("FindExactSecretAcrossVaults returned %v without seeing every vault", secret)
+	}
+	if !strings.Contains(err.Error(), "Kustom") {
+		t.Errorf("error = %v, want it to name the vault that could not be listed", err)
 	}
 }
