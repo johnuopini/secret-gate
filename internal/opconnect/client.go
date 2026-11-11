@@ -41,10 +41,11 @@ type Field struct {
 	Value   string `json:"value"`
 }
 
-// New creates a new 1Password Connect client
+// New creates a new 1Password Connect client. A trailing slash on baseURL is
+// dropped, since every API path is appended with its own leading slash.
 func New(baseURL, token string) *Client {
 	return &Client{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -202,11 +203,11 @@ func (c *Client) HealthCheck() error {
 
 // SearchResult represents a fuzzy search match
 type SearchResult struct {
-	Item       Item    `json:"item"`
-	VaultName  string  `json:"vault_name"`
-	VaultID    string  `json:"vault_id"`
-	Score      float64 `json:"score"`
-	MatchType  string  `json:"match_type"` // "exact", "prefix", "contains", "fuzzy"
+	Item      Item    `json:"item"`
+	VaultName string  `json:"vault_name"`
+	VaultID   string  `json:"vault_id"`
+	Score     float64 `json:"score"`
+	MatchType string  `json:"match_type"` // "exact", "prefix", "contains", "fuzzy"
 }
 
 // FieldInfo holds metadata about a field without its value

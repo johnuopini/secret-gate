@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +24,70 @@ func unreachableClient(t *testing.T) *Client {
 	c := New(testToken, 42)
 	c.baseURL = srv.URL + "/bot" + testToken
 	return c
+}
+
+func TestMessages_ShowEveryRequestValueExactlyAsSent(t *testing.T) {
+	c, calls := recordingAPI(t)
+	// Every value comes from the requester. Each one tries to close the code
+	// span or tag it sits in and add markup of its own.
+	req := testRequest()
+	req.SecretName = "db`</code><b>prod</b>"
+	req.Vault = "Home_Lab"
+	req.RequesterMachine = "dev_vm`*x*"
+	req.RequesterIP = "10.0.0.7`, <i>1.2.3.4</i>"
+	req.Reason = "fix [bug](http://x) & <deploy>"
+	req.SessionID = "fedcba9876543210fedcba9876543210"
+	req.SessionExpiresAt = time.Now().Add(8 * time.Hour)
+
+	c.SendApprovalRequest(req, "")
+	c.SendSessionRelease(req)
+	c.UpdateMessageApproved(77, req, "fr_anz")
+	c.UpdateMessageDenied(77, req, "fr_anz")
+	c.SendSessionEnded(req.RequesterMachine, "@fr_anz", 0)
+
+	code := func(s string) string { return "<code>" + html.EscapeString(s) + "</code>" }
+	request := []string{code(req.SecretName), code(req.Vault), code(req.RequesterMachine), code(req.RequesterIP), html.EscapeString(req.Reason)}
+	answered := []string{code(req.SecretName), code(req.Vault), code(req.RequesterMachine), "@fr_anz"}
+	want := [][]string{request, request, answered, answered, {code(req.RequesterMachine), "@fr_anz"}}
+
+	if len(*calls) != len(want) {
+		t.Fatalf("sent %d messages, want %d", len(*calls), len(want))
+	}
+	for i, call := range *calls {
+		if call.Body["parse_mode"] != "HTML" {
+			t.Errorf("%s #%d parse_mode = %v, want HTML", call.Method, i, call.Body["parse_mode"])
+		}
+		text := call.Body["text"].(string)
+		for _, w := range want[i] {
+			if !strings.Contains(text, w) {
+				t.Errorf("%s #%d does not show %q:\n%s", call.Method, i, w, text)
+			}
+		}
+	}
+}
+
+func TestAnsweredMessages_ListEverySecretOfABatch(t *testing.T) {
+	c, calls := recordingAPI(t)
+	req := testRequest()
+	req.Secrets = []models.SecretRequest{
+		{SecretName: "db", Vault: "HomeLab"},
+		{SecretName: "llm-proxy", Fields: []string{"password"}},
+	}
+
+	c.UpdateMessageApproved(77, req, "approver")
+	c.UpdateMessageDenied(77, req, "approver")
+
+	if len(*calls) != 2 {
+		t.Fatalf("sent %d edits, want 2", len(*calls))
+	}
+	for i, call := range *calls {
+		text := call.Body["text"].(string)
+		for _, name := range []string{"<code>db</code>", "<code>llm-proxy</code>"} {
+			if !strings.Contains(text, name) {
+				t.Errorf("%s #%d does not show %s:\n%s", call.Method, i, name, text)
+			}
+		}
+	}
 }
 
 func TestTransportErrors_DoNotContainBotToken(t *testing.T) {

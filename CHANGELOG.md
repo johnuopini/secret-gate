@@ -14,6 +14,13 @@
 ### Fixed
 
 - **Exact title match** — a secret requested from a named vault is looked up by its exact title, so a name holding a double quote can no longer release a different item than the one shown in the approval message.
+- A request whose Telegram prompt cannot be sent now fails at once with `503 notify_failed` instead of waiting until it expires.
+- `OP_CONNECT_HOST` with a trailing slash no longer produces `//v1/...` paths that Connect rejects.
+- **Telegram messages are sent as HTML** with every value from the requester escaped. Before, a backtick in a secret name, machine name or the forwarded IP could end its code span and change what the approver read.
+- A batch request that names the same secret twice is refused with `400 duplicate_secret`. Two names that find the same item now share one entry with the fields of both, and two items of one title from different vaults fail at retrieval. Before, the reply, which is keyed by name, silently kept only one of them.
+- An entry in `secrets[]` without a name is refused with `400 missing_fields` instead of being shown to the approver.
+- The approved and denied messages list every secret of a batch, not only the first.
+- Without `WEBHOOK_BASE_URL` the gate answers `500 config_error` before it stores the request or asks the approver.
 
 ## v0.2.1 — Cross-Platform & SSH Fixes
 

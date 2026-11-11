@@ -164,6 +164,14 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The client polls the status URL built from this, so without it no one
+	// is asked about a request the client could never follow.
+	baseURL := h.config.WebhookBaseURL
+	if baseURL == "" {
+		h.writeError(w, http.StatusInternalServerError, "config_error", "WEBHOOK_BASE_URL not configured")
+		return
+	}
+
 	var payload BatchRequestPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid_json", "Invalid JSON payload")
@@ -181,6 +189,21 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 	if len(secrets) == 0 {
 		h.writeError(w, http.StatusBadRequest, "missing_fields", "secret_name or secrets[] is required")
 		return
+	}
+
+	// The batch reply is keyed by name, so a name asked for twice would hand
+	// back only one of the two.
+	named := make(map[string]bool, len(secrets))
+	for _, s := range secrets {
+		if s.SecretName == "" {
+			h.writeError(w, http.StatusBadRequest, "missing_fields", "every entry in secrets[] needs a secret_name")
+			return
+		}
+		if named[s.SecretName] {
+			h.writeError(w, http.StatusBadRequest, "duplicate_secret", fmt.Sprintf("secrets[] names %q more than once. The reply is keyed by name, so ask for each name once, or send one request per vault.", s.SecretName))
+			return
+		}
+		named[s.SecretName] = true
 	}
 
 	// Use the first secret's name for the approval request label
@@ -237,14 +260,17 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send Telegram notification
+	// Ask the approver. A request no one was shown can never be approved, so
+	// the client is told now instead of polling until it expires.
 	msgID, err := h.notifier.SendApprovalRequest(req, h.config.WebhookBaseURL)
 	if err != nil {
 		h.log.Error("Failed to send Telegram notification", logger.F("error", err.Error(), "request_id", req.ID))
-	} else {
-		req.TelegramMsgID = msgID
-		h.store.Update(req)
+		h.store.Delete(req.Token)
+		h.writeError(w, http.StatusServiceUnavailable, "notify_failed", "Could not send the approval request to Telegram. Try again.")
+		return
 	}
+	req.TelegramMsgID = msgID
+	h.store.Update(req)
 
 	h.log.Info("Created approval request", logger.F(
 		"request_id", req.ID,
@@ -252,13 +278,6 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 		"machine", req.RequesterMachine,
 		"requester_ip", req.RequesterIP,
 	))
-
-	// Build response
-	baseURL := h.config.WebhookBaseURL
-	if baseURL == "" {
-		h.writeError(w, http.StatusInternalServerError, "config_error", "WEBHOOK_BASE_URL not configured")
-		return
-	}
 
 	resp := RequestResponse{
 		Token:          req.Token,
@@ -280,12 +299,6 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 // any other; the notice already sent carries the same request ID as that
 // prompt.
 func (h *Handler) releaseUnderSession(w http.ResponseWriter, req *models.ApprovalRequest, token string, sess session.Session) bool {
-	baseURL := h.config.WebhookBaseURL
-	if baseURL == "" {
-		h.writeError(w, http.StatusInternalServerError, "config_error", "WEBHOOK_BASE_URL not configured")
-		return true
-	}
-
 	req.SessionID = sess.ID
 	req.SessionExpiresAt = sess.ExpiresAt
 
@@ -323,7 +336,7 @@ func (h *Handler) releaseUnderSession(w http.ResponseWriter, req *models.Approva
 
 	h.writeJSON(w, http.StatusAccepted, RequestResponse{
 		Token:     req.Token,
-		StatusURL: baseURL + "/status/" + req.Token,
+		StatusURL: h.config.WebhookBaseURL + "/status/" + req.Token,
 		ExpiresAt: req.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"),
 		Message:   "Request released under an open approval window. Poll the status_url to retrieve the secret.",
 	})
@@ -428,7 +441,11 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 
 	// Batch mode: multiple secrets requested or field filtering specified
 	if len(req.Secrets) > 1 || (len(req.Secrets) == 1 && len(req.Secrets[0].Fields) > 0) {
+		// The reply is keyed by item title. Two names that find the same
+		// item share one entry holding the fields of both; two items of one
+		// title from different vaults cannot both be handed back.
 		result := make(map[string]map[string]string)
+		foundIn := make(map[string]string)
 
 		for _, s := range req.Secrets {
 			vault := s.Vault
@@ -437,11 +454,11 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 			}
 
 			var allFields map[string]string
-			var actualName string
+			var actualName, actualVault string
 
 			if vault == "_auto_" {
 				var err error
-				allFields, _, actualName, err = h.findAcrossVaults(req, s.SecretName)
+				allFields, actualVault, actualName, err = h.findAcrossVaults(req, s.SecretName)
 				if err != nil {
 					h.log.Error("Failed to find secret", logger.F("error", err.Error(), "secret", s.SecretName))
 					h.fetchFailed(w, req, fmt.Sprintf("Failed to retrieve %s: %s", s.SecretName, err.Error()))
@@ -455,20 +472,31 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 					h.fetchFailed(w, req, fmt.Sprintf("Failed to retrieve %s: %s", s.SecretName, err.Error()))
 					return
 				}
-				actualName = s.SecretName
+				actualName, actualVault = s.SecretName, vault
 			}
 
-			// Filter fields if specified
-			if len(s.Fields) > 0 {
-				filtered := make(map[string]string)
-				for _, f := range s.Fields {
-					if val, ok := allFields[f]; ok {
-						filtered[f] = val
-					}
+			if held, taken := foundIn[actualName]; taken && held != actualVault {
+				h.log.Error("Two requested names found items of one title in different vaults", logger.F("request_id", req.ID, "secret", s.SecretName, "item", actualName, "vault", actualVault, "held_vault", held))
+				h.fetchFailed(w, req, fmt.Sprintf("Failed to retrieve %s: it finds %q in vault %q, and this request already holds the item of that title from vault %q. The reply is keyed by title, so send one request per vault.", s.SecretName, actualName, actualVault, held))
+				return
+			}
+			foundIn[actualName] = actualVault
+
+			entry := result[actualName]
+			if entry == nil {
+				entry = make(map[string]string)
+				result[actualName] = entry
+			}
+			if len(s.Fields) == 0 {
+				for f, val := range allFields {
+					entry[f] = val
 				}
-				result[actualName] = filtered
-			} else {
-				result[actualName] = allFields
+				continue
+			}
+			for _, f := range s.Fields {
+				if val, ok := allFields[f]; ok {
+					entry[f] = val
+				}
 			}
 		}
 
@@ -951,8 +979,11 @@ func OpenAPISpec() string {
               }
             }
           },
+          "400": {
+            "description": "The payload is not valid JSON, names no secret, has an entry in 'secrets' without 'secret_name', or names the same secret more than once in 'secrets' (error 'duplicate_secret'). The batch reply is keyed by secret name, so each name may appear once."
+          },
           "503": {
-            "description": "The request came under an open approval window but the approver could not be notified, so nothing was released. Try again."
+            "description": "The approver could not be reached on Telegram, so the request was not created (or, under an open approval window, nothing was released). Try again."
           }
         }
       }

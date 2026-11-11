@@ -98,6 +98,27 @@ func fakeConnectVaults(t *testing.T, vaults ...fakeVault) *Client {
 	return New(srv.URL, "test-token")
 }
 
+func TestNew_HostWithATrailingSlash_StillReachesTheAPI(t *testing.T) {
+	// A plain handler, not a ServeMux: a mux would redirect "//v1/vaults"
+	// to the clean path and hide the doubled slash.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/vaults" {
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode([]Vault{{ID: "vault-1", Name: "HomeLab"}})
+	}))
+	t.Cleanup(srv.Close)
+
+	vaults, err := New(srv.URL+"/", "test-token").GetVaults()
+	if err != nil {
+		t.Fatalf("GetVaults: %v", err)
+	}
+	if len(vaults) != 1 || vaults[0].Name != "HomeLab" {
+		t.Errorf("vaults = %v, want HomeLab", vaults)
+	}
+}
+
 func TestGetSecret_NamedVault_ReturnsFieldValues(t *testing.T) {
 	client := fakeConnect(t, "llm-proxy")
 

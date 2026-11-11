@@ -204,7 +204,7 @@ func TestSendSessionEnded_SaysWhoEndedIt(t *testing.T) {
 		}
 
 		text := (*calls)[0].Body["text"].(string)
-		if !strings.Contains(text, "*Ended by:* "+by+"\n") {
+		if !strings.Contains(text, "<b>Ended by:</b> "+by+"\n") {
 			t.Errorf("message does not say the window was ended by %q:\n%s", by, text)
 		}
 	}

@@ -23,16 +23,18 @@ import (
 	"github.com/johnuopini/secret-gate/internal/telegram"
 )
 
-// Vault is the name of the one vault the fake Connect serves.
+// Vault is the name of the vault the fake Connect serves items from unless
+// they name another.
 const Vault = "HomeLab"
 
 // Approver is the Telegram username every tap comes from.
 const Approver = "approver"
 
-// Item is one 1Password item in the fake vault.
+// Item is one 1Password item in the fake Connect.
 type Item struct {
 	Title  string
 	Fields map[string]string
+	Vault  string // empty means Vault
 }
 
 // Gate is a running gate.
@@ -105,10 +107,18 @@ type Notifier struct {
 	endedBy        []string
 	endedStillOpen []int
 	answers        []string
+	failPrompts    bool
 	failReleases   bool
 	failEdits      bool
 	onPrompt       func(requestID string)
 	onRelease      func()
+}
+
+// FailPrompts makes every later approval prompt fail to send.
+func (n *Notifier) FailPrompts() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.failPrompts = true
 }
 
 // FailReleases makes every later release notice fail to send.
@@ -210,6 +220,10 @@ func (n *Notifier) lastAnswer() string {
 // SendApprovalRequest implements handlers.Notifier.
 func (n *Notifier) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL string) (int, error) {
 	n.mu.Lock()
+	if n.failPrompts {
+		n.mu.Unlock()
+		return 0, errors.New("telegram is unreachable")
+	}
 	n.prompts = append(n.prompts, *req)
 	messageID := len(n.prompts)
 	onPrompt := n.onPrompt
@@ -278,32 +292,50 @@ func (n *Notifier) AnswerCallbackQuery(callbackID, text string) error {
 	return nil
 }
 
-// fakeConnect serves the vault over the routes 1Password Connect answers.
+// fakeConnect serves the vaults over the routes 1Password Connect answers.
+// Vault is always listed first, the others in the order their first item
+// appears.
 func fakeConnect(t *testing.T, items []Item) *opconnect.Client {
 	t.Helper()
 
-	const vaultID = "vault-1"
+	vaults := []opconnect.Vault{{ID: "vault-1", Name: Vault}}
+	vaultIDs := map[string]string{Vault: "vault-1"}
 	full := make(map[string]opconnect.Item, len(items))
-	titles := make([]opconnect.Item, 0, len(items))
+	titles := make(map[string][]opconnect.Item)
 	for i, item := range items {
+		vault := item.Vault
+		if vault == "" {
+			vault = Vault
+		}
+		vaultID, ok := vaultIDs[vault]
+		if !ok {
+			vaultID = fmt.Sprintf("vault-%d", len(vaults)+1)
+			vaultIDs[vault] = vaultID
+			vaults = append(vaults, opconnect.Vault{ID: vaultID, Name: vault})
+		}
+
 		id := fmt.Sprintf("item-%d", i+1)
 		var fields []opconnect.Field
 		for label, value := range item.Fields {
 			fields = append(fields, opconnect.Field{ID: label, Type: "CONCEALED", Label: label, Value: value})
 		}
-		full[id] = opconnect.Item{ID: id, Title: item.Title, Fields: fields}
-		titles = append(titles, opconnect.Item{ID: id, Title: item.Title})
+		full[vaultID+"/"+id] = opconnect.Item{ID: id, Title: item.Title, Fields: fields}
+		titles[vaultID] = append(titles[vaultID], opconnect.Item{ID: id, Title: item.Title})
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/vaults", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]opconnect.Vault{{ID: vaultID, Name: Vault}})
+		json.NewEncoder(w).Encode(vaults)
 	})
-	mux.HandleFunc("GET /v1/vaults/"+vaultID+"/items", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(titles)
+	mux.HandleFunc("GET /v1/vaults/{vault}/items", func(w http.ResponseWriter, r *http.Request) {
+		list := titles[r.PathValue("vault")]
+		if list == nil {
+			list = []opconnect.Item{}
+		}
+		json.NewEncoder(w).Encode(list)
 	})
-	mux.HandleFunc("GET /v1/vaults/"+vaultID+"/items/{id}", func(w http.ResponseWriter, r *http.Request) {
-		item, ok := full[r.PathValue("id")]
+	mux.HandleFunc("GET /v1/vaults/{vault}/items/{id}", func(w http.ResponseWriter, r *http.Request) {
+		item, ok := full[r.PathValue("vault")+"/"+r.PathValue("id")]
 		if !ok {
 			http.NotFound(w, r)
 			return

@@ -394,7 +394,12 @@ func TestSecret_ThatCannotBeFetched_KeepsTheMachinesOtherWindowsOpen(t *testing.
 }
 
 func TestRequest_UnderAWindow_WithoutAVault_ReleasesTheItemTitledExactlyThat(t *testing.T) {
-	gate := gatetest.Start(t, vault)
+	// "DB" comes first and a lookup that ignores case would take it for "db".
+	gate := gatetest.Start(t, []gatetest.Item{
+		vault[0],
+		{Title: "DB", Fields: map[string]string{"password": "other-db-pass"}},
+		{Title: "db", Fields: map[string]string{"password": "db-pass"}},
+	})
 	windowToken := openWindow(t, gate)
 
 	_, reply := ask(t, gate, handlers.BatchRequestPayload{

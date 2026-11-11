@@ -31,13 +31,13 @@ type ApprovalRequest struct {
 	Vault            string          `json:"vault"`
 	Secrets          []SecretRequest `json:"secrets,omitempty"` // Batch mode
 	RequesterMachine string          `json:"requester_machine"`
-	RequesterIP      string        `json:"requester_ip"`
-	Reason           string        `json:"reason,omitempty"`
-	Status           RequestStatus `json:"status"`
-	RequestedAt      time.Time     `json:"requested_at"`
-	ExpiresAt        time.Time     `json:"expires_at"`
-	RespondedAt      *time.Time    `json:"responded_at,omitempty"`
-	TelegramMsgID    int           `json:"telegram_msg_id,omitempty"`
+	RequesterIP      string          `json:"requester_ip"`
+	Reason           string          `json:"reason,omitempty"`
+	Status           RequestStatus   `json:"status"`
+	RequestedAt      time.Time       `json:"requested_at"`
+	ExpiresAt        time.Time       `json:"expires_at"`
+	RespondedAt      *time.Time      `json:"responded_at,omitempty"`
+	TelegramMsgID    int             `json:"telegram_msg_id,omitempty"`
 
 	// Approval window. None of it is serialized: the token reaches the client
 	// once, through the secret response.
