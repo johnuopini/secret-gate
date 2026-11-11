@@ -724,6 +724,144 @@ func TestHandleSSHWithSecret_NoSSHKeyInFields(t *testing.T) {
 	}
 }
 
+const testSSHKey = "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-test-key\n-----END OPENSSH PRIVATE KEY-----"
+
+// fakeSSHTools puts fake ssh and ssh-add binaries first on PATH and returns the
+// directory where they record what they were called with:
+//   - ssh-add-called: written when ssh-add runs (it then exits with sshAddExit)
+//   - args: one ssh argument per line
+//   - key, mode, keypath: content, permissions and path of the file given with -i
+func fakeSSHTools(t *testing.T, sshAddExit int) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	binDir := t.TempDir()
+	outDir := t.TempDir()
+
+	sshAdd := fmt.Sprintf("#!/bin/sh\necho called > '%s/ssh-add-called'\nexit %d\n", outDir, sshAddExit)
+	ssh := fmt.Sprintf(`#!/bin/sh
+out='%s'
+printf '%%s\n' "$@" > "$out/args"
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-i" ]; then
+    cat "$2" > "$out/key"
+    ls -l "$2" | cut -c1-10 > "$out/mode"
+    printf '%%s' "$2" > "$out/keypath"
+  fi
+  shift
+done
+echo fake-ssh-ok
+`, outDir)
+
+	for name, script := range map[string]string{"ssh-add": sshAdd, "ssh": ssh} {
+		if err := os.WriteFile(binDir+"/"+name, []byte(script), 0755); err != nil {
+			t.Fatalf("writing fake %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	return outDir
+}
+
+func readRecorded(t *testing.T, outDir, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(outDir + "/" + name)
+	if err != nil {
+		t.Fatalf("fake ssh did not record %s: %v", name, err)
+	}
+	return string(data)
+}
+
+func sshKeyDaemon() *mockDaemonClient {
+	dc := newMockDaemonClient(true)
+	dc.cache["deploy-key:"] = map[string]string{"private_key": testSSHKey}
+	return dc
+}
+
+func TestHandleSSHWithSecret_AgentAddFails_PassesKeyFileToSSH(t *testing.T) {
+	outDir := fakeSSHTools(t, 1)
+	cfg := Config{SSHAgent: true, CacheTTLSec: 3600}
+
+	result, output, err := handleSSHWithSecret(context.Background(), sshKeyDaemon(), cfg, SSHWithSecretInput{
+		SecretName: "deploy-key", Host: "deploy@example.com", Command: "uptime",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected success, got tool error: %+v", result.Content[0])
+	}
+	if output.ExitCode != 0 || !strings.Contains(output.Stdout, "fake-ssh-ok") {
+		t.Fatalf("ssh did not run: exit=%d stdout=%q stderr=%q", output.ExitCode, output.Stdout, output.Stderr)
+	}
+	if got := readRecorded(t, outDir, "key"); got != testSSHKey+"\n" {
+		t.Errorf("key file content = %q, want the key followed by a newline", got)
+	}
+	args := strings.Split(strings.TrimSpace(readRecorded(t, outDir, "args")), "\n")
+	if n := len(args); n < 2 || args[n-2] != "deploy@example.com" || args[n-1] != "uptime" {
+		t.Errorf("ssh args = %q, want host and command last", args)
+	}
+}
+
+func TestHandleSSHWithSecret_AgentDisabled_PassesKeyFileToSSH(t *testing.T) {
+	outDir := fakeSSHTools(t, 0)
+	cfg := Config{SSHAgent: false, CacheTTLSec: 3600}
+
+	result, _, err := handleSSHWithSecret(context.Background(), sshKeyDaemon(), cfg, SSHWithSecretInput{
+		SecretName: "deploy-key", Host: "deploy@example.com",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected success, got tool error: %+v", result.Content[0])
+	}
+	if _, err := os.Stat(outDir + "/ssh-add-called"); err == nil {
+		t.Error("ssh-add was called although ssh-agent integration is disabled")
+	}
+	if got := readRecorded(t, outDir, "key"); got != testSSHKey+"\n" {
+		t.Errorf("key file content = %q, want the key followed by a newline", got)
+	}
+}
+
+func TestHandleSSHWithSecret_KeyFileIsOwnerOnlyAndRemoved(t *testing.T) {
+	outDir := fakeSSHTools(t, 1)
+	cfg := Config{SSHAgent: true, CacheTTLSec: 3600}
+
+	if _, _, err := handleSSHWithSecret(context.Background(), sshKeyDaemon(), cfg, SSHWithSecretInput{
+		SecretName: "deploy-key", Host: "deploy@example.com",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := strings.TrimSpace(readRecorded(t, outDir, "mode")); got != "-rw-------" {
+		t.Errorf("key file mode = %q, want -rw-------", got)
+	}
+	keyPath := readRecorded(t, outDir, "keypath")
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Errorf("key file %s still exists after the command finished (stat err: %v)", keyPath, err)
+	}
+}
+
+func TestHandleSSHWithSecret_AgentAddSucceeds_NoKeyFile(t *testing.T) {
+	outDir := fakeSSHTools(t, 0)
+	cfg := Config{SSHAgent: true, CacheTTLSec: 3600}
+
+	result, _, err := handleSSHWithSecret(context.Background(), sshKeyDaemon(), cfg, SSHWithSecretInput{
+		SecretName: "deploy-key", Host: "deploy@example.com",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected success, got tool error: %+v", result.Content[0])
+	}
+	for _, arg := range strings.Split(readRecorded(t, outDir, "args"), "\n") {
+		if arg == "-i" {
+			t.Error("ssh got -i although the key was added to ssh-agent")
+		}
+	}
+}
+
 // --- executor tests ---
 
 func TestExecCommand_SimpleEcho(t *testing.T) {
