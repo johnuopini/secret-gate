@@ -41,10 +41,11 @@ type Field struct {
 	Value   string `json:"value"`
 }
 
-// New creates a new 1Password Connect client
+// New creates a new 1Password Connect client. A trailing slash on baseURL is
+// dropped, since every API path is appended with its own leading slash.
 func New(baseURL, token string) *Client {
 	return &Client{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
