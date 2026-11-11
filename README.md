@@ -267,6 +267,9 @@ Approving every secret one by one gets tiring during a long working session. Whe
 - `daemon flush` and `daemon stop` make the machine forget the token, but the window stays open on the gate until it expires or you end it from Telegram.
 - Windows live in the server's memory, so a server restart closes all of them.
 - A release that cannot be reported to Telegram is refused.
+- Under a window, a secret requested without a vault must be named by its exact title, and that title must belong to one item only across all vaults. A name that only comes close is reported in the chat but nothing is handed out; the error names the closest title.
+- If the approval message cannot be updated to show the window and its end button, the tap approves that one request and opens no window.
+- If the secret whose approval opened the window cannot be fetched, the window is closed again and the chat says so.
 - `--no-cache` neither asks for a window nor uses an open one.
 
 The window length is set on the server with `SESSION_TTL` (default `8h`); `SESSION_TTL=0` removes the button.

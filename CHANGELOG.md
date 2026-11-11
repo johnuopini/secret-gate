@@ -5,6 +5,7 @@
 ### Added
 
 - **Approval window** — a third Telegram button, **Approve for 8h**, approves the request and lets later requests from the same machine through without a new tap until the window closes. Every such release is reported in the chat with an **End approval window** button. See the README section "Approval Window" for what this trades away.
+- Under an approval window a secret requested without a vault is handed out only when exactly one item has exactly that title, so the release message always names the item that was released.
 - **`SESSION_TTL`** server setting — length of an approval window (default `8h`); `0` turns the feature off.
 - The command line client, the MCP server and the daemon hold and present the window. `daemon status` lists open windows and `daemon flush` forgets them on the machine.
 - OpenAPI spec 1.2.0 describes the new `session`, `session_token` and `session_invalid` fields.

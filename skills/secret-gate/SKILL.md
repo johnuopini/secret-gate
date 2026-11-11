@@ -80,6 +80,7 @@ The approver can answer a request with **Approve for 8h** instead of **Approve**
 - The client says so on stderr ("Approval window open until ...") and `daemon status` lists it
 - An open window changes nothing about the rules below: still give a real reason for every request, still ask only for the field you need, still report what you used
 - Do not fetch secrets just because a window is open — the approver sees every release
+- Under an open window, name the secret by its exact title (take it from the search results): a name that only comes close is refused, and the error names the closest title
 - `--no-cache` neither asks for a window nor uses an open one
 
 ## Workflow
