@@ -167,6 +167,26 @@ func TestRequest_WithoutAWebhookBaseURL_AsksNoOne(t *testing.T) {
 	}
 }
 
+func TestRequest_WithAnUnnamedSecret_IsRefused(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+
+	code, reply := ask(t, gate, handlers.BatchRequestPayload{
+		Secrets: []models.SecretRequest{
+			{SecretName: "llm-proxy"},
+			{SecretName: "", Fields: []string{"password"}},
+		},
+		Machine: "devvm",
+		Reason:  "test",
+	})
+
+	if code != http.StatusBadRequest {
+		t.Errorf("POST /request = %d, want %d", code, http.StatusBadRequest)
+	}
+	if reply.Token != "" || len(gate.Notifier.Prompts()) != 0 {
+		t.Error("the approver was asked about a secret with no name")
+	}
+}
+
 func TestRequest_NamingTheSameSecretTwice_IsRefused(t *testing.T) {
 	gate := gatetest.Start(t, vault)
 

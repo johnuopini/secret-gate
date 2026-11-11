@@ -195,6 +195,10 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 	// back only one of the two.
 	named := make(map[string]bool, len(secrets))
 	for _, s := range secrets {
+		if s.SecretName == "" {
+			h.writeError(w, http.StatusBadRequest, "missing_fields", "every entry in secrets[] needs a secret_name")
+			return
+		}
 		if named[s.SecretName] {
 			h.writeError(w, http.StatusBadRequest, "duplicate_secret", fmt.Sprintf("secrets[] names %q more than once. The reply is keyed by name, so ask for each name once, or send one request per vault.", s.SecretName))
 			return
@@ -976,7 +980,7 @@ func OpenAPISpec() string {
             }
           },
           "400": {
-            "description": "The payload is not valid JSON, names no secret, or names the same secret more than once in 'secrets' (error 'duplicate_secret'). The batch reply is keyed by secret name, so each name may appear once."
+            "description": "The payload is not valid JSON, names no secret, has an entry in 'secrets' without 'secret_name', or names the same secret more than once in 'secrets' (error 'duplicate_secret'). The batch reply is keyed by secret name, so each name may appear once."
           },
           "503": {
             "description": "The approver could not be reached on Telegram, so the request was not created (or, under an open approval window, nothing was released). Try again."
