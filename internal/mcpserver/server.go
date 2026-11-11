@@ -14,10 +14,10 @@ import (
 
 // Handler defaults.
 const (
-	defaultSearchLimit  = 10
-	defaultSSHPort      = 22
-	defaultSSHTimeout   = 120 * time.Second
-	defaultSSHAgentTTL  = 1 * time.Hour
+	defaultSearchLimit = 10
+	defaultSSHPort     = 22
+	defaultSSHTimeout  = 120 * time.Second
+	defaultSSHAgentTTL = 1 * time.Hour
 )
 
 // --- Interfaces ---
@@ -522,8 +522,8 @@ type realDaemonClient struct {
 func NewRealDaemonClient() FullDaemonClient {
 	selfBin, _ := os.Executable()
 	return &realDaemonClient{
-		client:  daemon.NewClient(daemon.SocketPath()),
-		selfBin: selfBin,
+		client:      daemon.NewClient(daemon.SocketPath()),
+		selfBin:     selfBin,
 		cacheTTLSec: 3600,
 	}
 }
@@ -532,8 +532,8 @@ func NewRealDaemonClient() FullDaemonClient {
 func NewRealDaemonClientWithConfig(cacheTTLSec int) FullDaemonClient {
 	selfBin, _ := os.Executable()
 	return &realDaemonClient{
-		client:  daemon.NewClient(daemon.SocketPath()),
-		selfBin: selfBin,
+		client:      daemon.NewClient(daemon.SocketPath()),
+		selfBin:     selfBin,
 		cacheTTLSec: cacheTTLSec,
 	}
 }

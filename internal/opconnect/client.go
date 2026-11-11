@@ -203,11 +203,11 @@ func (c *Client) HealthCheck() error {
 
 // SearchResult represents a fuzzy search match
 type SearchResult struct {
-	Item       Item    `json:"item"`
-	VaultName  string  `json:"vault_name"`
-	VaultID    string  `json:"vault_id"`
-	Score      float64 `json:"score"`
-	MatchType  string  `json:"match_type"` // "exact", "prefix", "contains", "fuzzy"
+	Item      Item    `json:"item"`
+	VaultName string  `json:"vault_name"`
+	VaultID   string  `json:"vault_id"`
+	Score     float64 `json:"score"`
+	MatchType string  `json:"match_type"` // "exact", "prefix", "contains", "fuzzy"
 }
 
 // FieldInfo holds metadata about a field without its value
