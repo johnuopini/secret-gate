@@ -165,7 +165,7 @@ func TestSendSessionRelease_IsSilentAndCarriesTheEndButton(t *testing.T) {
 func TestSendSessionEnded_NamesTheMachine(t *testing.T) {
 	c, calls := recordingAPI(t)
 
-	if err := c.SendSessionEnded("devvm", "franz"); err != nil {
+	if err := c.SendSessionEnded("devvm", "franz", 0); err != nil {
 		t.Fatalf("SendSessionEnded: %v", err)
 	}
 
@@ -175,11 +175,31 @@ func TestSendSessionEnded_NamesTheMachine(t *testing.T) {
 	}
 }
 
+func TestSendSessionEnded_SaysWhetherOtherWindowsStayOpen(t *testing.T) {
+	cases := map[int]string{
+		0: "The next request from this machine asks for approval again.",
+		1: "1 other approval window of this machine stays open. The End button of any of them closes them all.",
+		2: "2 other approval windows of this machine stay open. The End button of any of them closes them all.",
+	}
+	for stillOpen, want := range cases {
+		c, calls := recordingAPI(t)
+
+		if err := c.SendSessionEnded("devvm", "the gate", stillOpen); err != nil {
+			t.Fatalf("SendSessionEnded: %v", err)
+		}
+
+		text := (*calls)[0].Body["text"].(string)
+		if !strings.HasSuffix(text, want) {
+			t.Errorf("with %d windows still open the message ends:\n%s\nwant it to end with %q", stillOpen, text, want)
+		}
+	}
+}
+
 func TestSendSessionEnded_SaysWhoEndedIt(t *testing.T) {
 	for _, by := range []string{"@franz", "the gate: the secret could not be fetched"} {
 		c, calls := recordingAPI(t)
 
-		if err := c.SendSessionEnded("devvm", by); err != nil {
+		if err := c.SendSessionEnded("devvm", by, 0); err != nil {
 			t.Fatalf("SendSessionEnded: %v", err)
 		}
 

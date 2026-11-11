@@ -26,7 +26,7 @@ type Notifier interface {
 	UpdateMessageDenied(messageID int, req *models.ApprovalRequest, denier string) error
 	AnswerCallbackQuery(callbackID, text string) error
 	SendSessionRelease(req *models.ApprovalRequest) (int, error)
-	SendSessionEnded(machine, endedBy string) error
+	SendSessionEnded(machine, endedBy string, stillOpen int) error
 }
 
 // Handler holds dependencies for HTTP handlers
@@ -519,7 +519,7 @@ func (h *Handler) findAcrossVaults(req *models.ApprovalRequest, name string) (ma
 
 	fields, vault, err := h.opClient.FindExactSecretAcrossVaults(name)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("under an approval window a secret must be named by its exact title: %w", err)
+		return nil, "", "", fmt.Errorf("looking up the exact title under an approval window: %w", err)
 	}
 	return fields, vault, name, nil
 }
@@ -533,21 +533,22 @@ func (h *Handler) fetchFailed(w http.ResponseWriter, req *models.ApprovalRequest
 // closeUncollectedWindow ends the approval window req opened when its secret
 // cannot be handed over. The window token travels with the secret, so the
 // client never received it and its next request is asked about anyway; the
-// machine's windows are closed so that the chat does not show one as open.
+// window is closed so that the chat does not show it as open. Other windows
+// of the same machine were handed to their clients and stay open.
 func (h *Handler) closeUncollectedWindow(req *models.ApprovalRequest) {
 	if req.SessionToken == "" {
 		return
 	}
 	req.SessionToken = ""
 
-	machine, ended := h.sessions.End(req.SessionID)
-	if ended == 0 {
+	machine, stillOpen, found := h.sessions.Discard(req.SessionID)
+	if !found {
 		return
 	}
-	if err := h.notifier.SendSessionEnded(machine, "the gate: the secret could not be fetched, so the client never received the window"); err != nil {
+	if err := h.notifier.SendSessionEnded(machine, "the gate: the secret could not be fetched, so the client never received the window", stillOpen); err != nil {
 		h.log.Error("Failed to report approval window end", logger.F("error", err.Error(), "session_id", req.SessionID))
 	}
-	h.log.Info("Approval window ended, its secret could not be fetched", logger.F("request_id", req.ID, "session_id", req.SessionID, "machine", machine, "windows", ended))
+	h.log.Info("Approval window ended, its secret could not be fetched", logger.F("request_id", req.ID, "session_id", req.SessionID, "machine", machine, "windows_open", stillOpen))
 }
 
 // HandleCallback acts on a button the approver pressed. The button's data is
@@ -690,7 +691,7 @@ func (h *Handler) endSession(callbackID, sessionID, endedBy string) {
 	}
 
 	h.notifier.AnswerCallbackQuery(callbackID, "Approval window ended")
-	if err := h.notifier.SendSessionEnded(machine, "@"+endedBy); err != nil {
+	if err := h.notifier.SendSessionEnded(machine, "@"+endedBy, 0); err != nil {
 		h.log.Error("Failed to report approval window end", logger.F("error", err.Error(), "session_id", sessionID))
 	}
 	h.log.Info("Approval window ended", logger.F("session_id", sessionID, "machine", machine, "windows", ended, "ended_by", endedBy))

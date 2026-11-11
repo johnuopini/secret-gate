@@ -371,6 +371,28 @@ func TestSecret_ThatCannotBeFetched_ClosesTheWindowItsApprovalOpened(t *testing.
 	}
 }
 
+func TestSecret_ThatCannotBeFetched_KeepsTheMachinesOtherWindowsOpen(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	heldToken := openWindow(t, gate)
+
+	// Another client on devvm, holding no window, asks for an item that is not
+	// there and the approver opens a window with it.
+	_, reply := askFromWindowClient(t, gate, "devvm", "no-such-item", "")
+	prompts := gate.Notifier.Prompts()
+	gate.Tap("session:" + prompts[len(prompts)-1].ID)
+	if code, _ := retrieve(t, gate, reply.Token); code != http.StatusInternalServerError {
+		t.Fatalf("GET /secret = %d, want 500", code)
+	}
+
+	_, held := askFromWindowClient(t, gate, "devvm", "db", heldToken)
+	if got := statusOf(t, gate, held.Token); got != "approved" {
+		t.Errorf("request under the window the first client holds = %q, want approved: that window was closed too", got)
+	}
+	if open := gate.Notifier.EndedStillOpen(); len(open) != 1 || open[0] != 1 {
+		t.Errorf("approver was told %v windows of devvm stay open, want [1]", open)
+	}
+}
+
 func TestRequest_UnderAWindow_WithoutAVault_ReleasesTheItemTitledExactlyThat(t *testing.T) {
 	gate := gatetest.Start(t, vault)
 	windowToken := openWindow(t, gate)

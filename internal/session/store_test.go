@@ -123,13 +123,24 @@ func TestDiscard_ClosesOnlyThatSession(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	s.Discard(session.ID)
+	machine, stillOpen, found := s.Discard(session.ID)
 
 	if _, ok := s.Lookup(dropped); ok {
 		t.Error("the discarded session is still open")
 	}
 	if _, ok := s.Lookup(kept); !ok {
 		t.Error("Discard closed another session of the same machine")
+	}
+	if machine != "devvm" || stillOpen != 1 || !found {
+		t.Errorf("Discard = (%q, %d, %v), want (devvm, 1, true)", machine, stillOpen, found)
+	}
+}
+
+func TestDiscard_OfAnUnknownSession_FindsNothing(t *testing.T) {
+	s := NewStore()
+
+	if machine, stillOpen, found := s.Discard("missing"); found || machine != "" || stillOpen != 0 {
+		t.Errorf("Discard(missing) = (%q, %d, %v), want nothing found", machine, stillOpen, found)
 	}
 }
 

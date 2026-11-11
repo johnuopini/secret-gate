@@ -184,16 +184,18 @@ func (c *Client) SendSessionRelease(req *models.ApprovalRequest) (int, error) {
 	})
 }
 
-// SendSessionEnded reports that the approval windows of a machine were ended.
+// SendSessionEnded reports that approval windows of a machine were ended.
 // endedBy is shown as given: "@name" for a person, or the gate and its reason.
-func (c *Client) SendSessionEnded(machine, endedBy string) error {
+// stillOpen is how many other windows of the machine stay open.
+func (c *Client) SendSessionEnded(machine, endedBy string, stillOpen int) error {
 	text := fmt.Sprintf(
 		"🔒 *Approval Window Ended*\n\n"+
 			"*Machine:* `%s`\n"+
 			"*Ended by:* %s\n\n"+
-			"The next request from this machine asks for approval again.",
+			"%s",
 		escapeMarkdown(machine),
 		escapeMarkdown(endedBy),
+		stillOpenNote(stillOpen),
 	)
 
 	_, err := c.sendMessage(SendMessageRequest{
@@ -203,6 +205,18 @@ func (c *Client) SendSessionEnded(machine, endedBy string) error {
 		DisableNotification: true,
 	})
 	return err
+}
+
+// stillOpenNote tells the approver whether the machine still has open windows.
+func stillOpenNote(stillOpen int) string {
+	switch stillOpen {
+	case 0:
+		return "The next request from this machine asks for approval again."
+	case 1:
+		return "1 other approval window of this machine stays open. The End button of any of them closes them all."
+	default:
+		return fmt.Sprintf("%d other approval windows of this machine stay open. The End button of any of them closes them all.", stillOpen)
+	}
 }
 
 // UpdateMessageApproved updates a message to show it was approved

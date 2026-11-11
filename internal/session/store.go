@@ -96,17 +96,31 @@ func (s *Store) End(id string) (string, int) {
 }
 
 // Discard closes the session with the given ID and no other. It is for a
-// session that was created but never handed to a client.
-func (s *Store) Discard(id string) {
+// session that was created but never handed to a client. It returns the
+// session's machine and how many unexpired sessions that machine still has,
+// and found is false when no session has that ID.
+func (s *Store) Discard(id string) (machine string, stillOpen int, found bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for key, sess := range s.sessions {
 		if sess.ID == id {
 			delete(s.sessions, key)
-			return
+			machine, found = sess.Machine, true
+			break
 		}
 	}
+	if !found {
+		return "", 0, false
+	}
+
+	now := time.Now()
+	for _, sess := range s.sessions {
+		if sess.Machine == machine && !now.After(sess.ExpiresAt) {
+			stillOpen++
+		}
+	}
+	return machine, stillOpen, true
 }
 
 // Cleanup removes expired sessions and returns how many were removed.

@@ -96,18 +96,19 @@ func (g *Gate) TapEveryPrompt(button string) {
 
 // Notifier stands in for the Telegram chat and records what was sent to it.
 type Notifier struct {
-	mu           sync.Mutex
-	prompts      []models.ApprovalRequest
-	releases     []models.ApprovalRequest
-	approved     []models.ApprovalRequest
-	denied       []models.ApprovalRequest
-	ended        []string
-	endedBy      []string
-	answers      []string
-	failReleases bool
-	failEdits    bool
-	onPrompt     func(requestID string)
-	onRelease    func()
+	mu             sync.Mutex
+	prompts        []models.ApprovalRequest
+	releases       []models.ApprovalRequest
+	approved       []models.ApprovalRequest
+	denied         []models.ApprovalRequest
+	ended          []string
+	endedBy        []string
+	endedStillOpen []int
+	answers        []string
+	failReleases   bool
+	failEdits      bool
+	onPrompt       func(requestID string)
+	onRelease      func()
 }
 
 // FailReleases makes every later release notice fail to send.
@@ -153,6 +154,14 @@ func (n *Notifier) EndedBy() []string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return append([]string(nil), n.endedBy...)
+}
+
+// EndedStillOpen returns, for each report in Ended, how many windows of that
+// machine the approver was told stay open.
+func (n *Notifier) EndedStillOpen() []int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]int(nil), n.endedStillOpen...)
 }
 
 // Prompts returns the approval requests the approver was asked about.
@@ -233,11 +242,12 @@ func (n *Notifier) SendSessionRelease(req *models.ApprovalRequest) (int, error) 
 }
 
 // SendSessionEnded implements handlers.Notifier.
-func (n *Notifier) SendSessionEnded(machine, endedBy string) error {
+func (n *Notifier) SendSessionEnded(machine, endedBy string, stillOpen int) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.ended = append(n.ended, machine)
 	n.endedBy = append(n.endedBy, endedBy)
+	n.endedStillOpen = append(n.endedStillOpen, stillOpen)
 	return nil
 }
 
