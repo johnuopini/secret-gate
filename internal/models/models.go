@@ -38,6 +38,13 @@ type ApprovalRequest struct {
 	ExpiresAt        time.Time     `json:"expires_at"`
 	RespondedAt      *time.Time    `json:"responded_at,omitempty"`
 	TelegramMsgID    int           `json:"telegram_msg_id,omitempty"`
+
+	// Approval window. None of it is serialized: the token reaches the client
+	// once, through the secret response.
+	SessionTTL       time.Duration `json:"-"` // window on offer for this request, zero when none
+	SessionToken     string        `json:"-"` // token of the window this request opened, until retrieved
+	SessionID        string        `json:"-"` // window this request opened or was released under
+	SessionExpiresAt time.Time     `json:"-"`
 }
 
 // SecretValue holds the retrieved secret data
