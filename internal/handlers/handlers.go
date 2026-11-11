@@ -443,7 +443,7 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 				allFields, _, actualName, err = h.opClient.FindSecretAcrossVaults(s.SecretName)
 				if err != nil {
 					h.log.Error("Failed to find secret", logger.F("error", err.Error(), "secret", s.SecretName))
-					h.writeError(w, http.StatusInternalServerError, "secret_fetch_failed", fmt.Sprintf("Failed to retrieve %s: %s", s.SecretName, err.Error()))
+					h.fetchFailed(w, req, fmt.Sprintf("Failed to retrieve %s: %s", s.SecretName, err.Error()))
 					return
 				}
 			} else {
@@ -451,7 +451,7 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 				allFields, err = h.opClient.GetSecret(vault, s.SecretName)
 				if err != nil {
 					h.log.Error("Failed to fetch secret", logger.F("error", err.Error(), "secret", s.SecretName, "vault", vault))
-					h.writeError(w, http.StatusInternalServerError, "secret_fetch_failed", fmt.Sprintf("Failed to retrieve %s: %s", s.SecretName, err.Error()))
+					h.fetchFailed(w, req, fmt.Sprintf("Failed to retrieve %s: %s", s.SecretName, err.Error()))
 					return
 				}
 				actualName = s.SecretName
@@ -485,14 +485,14 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 		secret, actualVault, actualSecret, err = h.opClient.FindSecretAcrossVaults(req.SecretName)
 		if err != nil {
 			h.log.Error("Failed to find secret across vaults", logger.F("error", err.Error(), "request_id", req.ID, "secret", req.SecretName))
-			h.writeError(w, http.StatusInternalServerError, "secret_fetch_failed", err.Error())
+			h.fetchFailed(w, req, err.Error())
 			return
 		}
 	} else {
 		secret, err = h.opClient.GetSecret(req.Vault, req.SecretName)
 		if err != nil {
 			h.log.Error("Failed to fetch secret from 1Password", logger.F("error", err.Error(), "request_id", req.ID, "secret", req.SecretName, "vault", req.Vault))
-			h.writeError(w, http.StatusInternalServerError, "secret_fetch_failed", "Failed to retrieve secret from 1Password")
+			h.fetchFailed(w, req, "Failed to retrieve secret from 1Password")
 			return
 		}
 		actualVault = req.Vault
@@ -502,6 +502,32 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("Secret retrieved", logger.F("request_id", req.ID, "secret", actualSecret, "vault", actualVault))
 	h.store.Delete(token)
 	h.writeJSON(w, http.StatusOK, SecretResponse{Secret: secret, Session: sessionGrant(req)})
+}
+
+// fetchFailed answers a secret retrieval that 1Password did not satisfy.
+func (h *Handler) fetchFailed(w http.ResponseWriter, req *models.ApprovalRequest, message string) {
+	h.closeUncollectedWindow(req)
+	h.writeError(w, http.StatusInternalServerError, "secret_fetch_failed", message)
+}
+
+// closeUncollectedWindow ends the approval window req opened when its secret
+// cannot be handed over. The window token travels with the secret, so the
+// client never received it and its next request is asked about anyway; the
+// machine's windows are closed so that the chat does not show one as open.
+func (h *Handler) closeUncollectedWindow(req *models.ApprovalRequest) {
+	if req.SessionToken == "" {
+		return
+	}
+	req.SessionToken = ""
+
+	machine, ended := h.sessions.End(req.SessionID)
+	if ended == 0 {
+		return
+	}
+	if err := h.notifier.SendSessionEnded(machine, "the gate: the secret could not be fetched, so the client never received the window"); err != nil {
+		h.log.Error("Failed to report approval window end", logger.F("error", err.Error(), "session_id", req.SessionID))
+	}
+	h.log.Info("Approval window ended, its secret could not be fetched", logger.F("request_id", req.ID, "session_id", req.SessionID, "machine", machine, "windows", ended))
 }
 
 // HandleCallback acts on a button the approver pressed. The button's data is
@@ -644,7 +670,7 @@ func (h *Handler) endSession(callbackID, sessionID, endedBy string) {
 	}
 
 	h.notifier.AnswerCallbackQuery(callbackID, "Approval window ended")
-	if err := h.notifier.SendSessionEnded(machine, endedBy); err != nil {
+	if err := h.notifier.SendSessionEnded(machine, "@"+endedBy); err != nil {
 		h.log.Error("Failed to report approval window end", logger.F("error", err.Error(), "session_id", sessionID))
 	}
 	h.log.Info("Approval window ended", logger.F("session_id", sessionID, "machine", machine, "windows", ended, "ended_by", endedBy))

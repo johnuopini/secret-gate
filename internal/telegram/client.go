@@ -185,11 +185,12 @@ func (c *Client) SendSessionRelease(req *models.ApprovalRequest) (int, error) {
 }
 
 // SendSessionEnded reports that the approval windows of a machine were ended.
+// endedBy is shown as given: "@name" for a person, or the gate and its reason.
 func (c *Client) SendSessionEnded(machine, endedBy string) error {
 	text := fmt.Sprintf(
 		"🔒 *Approval Window Ended*\n\n"+
 			"*Machine:* `%s`\n"+
-			"*Ended by:* @%s\n\n"+
+			"*Ended by:* %s\n\n"+
 			"The next request from this machine asks for approval again.",
 		escapeMarkdown(machine),
 		escapeMarkdown(endedBy),

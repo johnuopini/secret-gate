@@ -175,6 +175,21 @@ func TestSendSessionEnded_NamesTheMachine(t *testing.T) {
 	}
 }
 
+func TestSendSessionEnded_SaysWhoEndedIt(t *testing.T) {
+	for _, by := range []string{"@franz", "the gate: the secret could not be fetched"} {
+		c, calls := recordingAPI(t)
+
+		if err := c.SendSessionEnded("devvm", by); err != nil {
+			t.Fatalf("SendSessionEnded: %v", err)
+		}
+
+		text := (*calls)[0].Body["text"].(string)
+		if !strings.Contains(text, "*Ended by:* "+by+"\n") {
+			t.Errorf("message does not say the window was ended by %q:\n%s", by, text)
+		}
+	}
+}
+
 func TestButtonData_FitsTelegramsLimit(t *testing.T) {
 	c, calls := recordingAPI(t)
 	req := testRequest()

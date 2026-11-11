@@ -102,6 +102,7 @@ type Notifier struct {
 	approved     []models.ApprovalRequest
 	denied       []models.ApprovalRequest
 	ended        []string
+	endedBy      []string
 	answers      []string
 	failReleases bool
 	failEdits    bool
@@ -144,6 +145,14 @@ func (n *Notifier) Ended() []string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return append([]string(nil), n.ended...)
+}
+
+// EndedBy returns, for each report in Ended, who the approver was told ended
+// the windows.
+func (n *Notifier) EndedBy() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]string(nil), n.endedBy...)
 }
 
 // Prompts returns the approval requests the approver was asked about.
@@ -228,6 +237,7 @@ func (n *Notifier) SendSessionEnded(machine, endedBy string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.ended = append(n.ended, machine)
+	n.endedBy = append(n.endedBy, endedBy)
 	return nil
 }
 

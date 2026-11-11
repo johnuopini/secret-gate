@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -335,6 +336,9 @@ func TestEndWindowTap_MakesTheNextRequestAskAgain(t *testing.T) {
 	if len(ended) != 1 || ended[0] != "devvm" {
 		t.Errorf("approver was told windows ended for %v, want [devvm]", ended)
 	}
+	if by := gate.Notifier.EndedBy(); len(by) != 1 || by[0] != "@"+gatetest.Approver {
+		t.Errorf("windows reported as ended by %v, want the approver who tapped", by)
+	}
 
 	_, reply := askFromWindowClient(t, gate, "devvm", "db", windowToken)
 	if !reply.SessionInvalid {
@@ -342,6 +346,28 @@ func TestEndWindowTap_MakesTheNextRequestAskAgain(t *testing.T) {
 	}
 	if got := statusOf(t, gate, reply.Token); got != "pending" {
 		t.Errorf("status = %q, want pending", got)
+	}
+}
+
+func TestSecret_ThatCannotBeFetched_ClosesTheWindowItsApprovalOpened(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	_, reply := askFromWindowClient(t, gate, "devvm", "no-such-item", "")
+	gate.Tap("session:" + onlyPromptID(t, gate))
+	windowID := gate.Notifier.Approved()[0].SessionID
+
+	code, secret := retrieve(t, gate, reply.Token)
+
+	if code != http.StatusInternalServerError || secret.Error != "secret_fetch_failed" {
+		t.Fatalf("GET /secret = %d %q, want 500 secret_fetch_failed", code, secret.Error)
+	}
+	if ended := gate.Notifier.Ended(); len(ended) != 1 || ended[0] != "devvm" {
+		t.Errorf("approver was told windows ended for %v, want [devvm]", ended)
+	}
+	if by := gate.Notifier.EndedBy(); len(by) != 1 || !strings.HasPrefix(by[0], "the gate") {
+		t.Errorf("window reported as ended by %v, want the gate", by)
+	}
+	if answer := gate.Tap("endsession:" + windowID); answer != "Approval window already ended" {
+		t.Errorf("the window the client never received is still open: End answered %q", answer)
 	}
 }
 
