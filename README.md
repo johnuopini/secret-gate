@@ -77,7 +77,7 @@ curl -sL https://raw.githubusercontent.com/johnuopini/secret-gate/main/install.s
 
 - **1Password Connect server** — a running instance that Secret Gate queries for secrets ([setup guide](https://developer.1password.com/docs/connect/get-started/))
 - **Telegram bot** — created via [@BotFather](https://t.me/BotFather) to send approval notifications
-- **Docker** (recommended) or Go 1.23+ for building from source
+- **Docker** (recommended) or Go 1.26+ for building from source
 
 ## Server Deployment
 
