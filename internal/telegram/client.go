@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -114,19 +115,19 @@ func New(token string, chatID int64) *Client {
 // SendApprovalRequest sends an approval request message with approve/deny buttons
 func (c *Client) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL string) (int, error) {
 	text := fmt.Sprintf(
-		"🔐 *Secret Access Request*\n\n"+
+		"🔐 <b>Secret Access Request</b>\n\n"+
 			"%s"+
-			"*Machine:* `%s`\n"+
-			"*IP:* `%s`\n"+
-			"*Reason:* %s\n"+
-			"*Expires:* %s\n\n"+
-			"*Request ID:* `%s`",
+			"<b>Machine:</b> %s\n"+
+			"<b>IP:</b> %s\n"+
+			"<b>Reason:</b> %s\n"+
+			"<b>Expires:</b> %s\n\n"+
+			"<b>Request ID:</b> %s",
 		describeSecrets(req),
-		escapeMarkdown(req.RequesterMachine),
-		req.RequesterIP,
-		escapeMarkdown(defaultIfEmpty(req.Reason, "Not provided")),
+		code(req.RequesterMachine),
+		code(req.RequesterIP),
+		html.EscapeString(defaultIfEmpty(req.Reason, "Not provided")),
 		req.ExpiresAt.Format("15:04:05 MST"),
-		req.ID,
+		code(req.ID),
 	)
 
 	keyboard := &InlineKeyboardMarkup{
@@ -141,8 +142,8 @@ func (c *Client) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL
 	if req.SessionTTL > 0 {
 		label := windowLabel(req.SessionTTL)
 		text += fmt.Sprintf(
-			"\n\n*Approve for %s:* later requests from `%s` are released without asking, each one reported here.",
-			label, escapeMarkdown(req.RequesterMachine))
+			"\n\n<b>Approve for %s:</b> later requests from %s are released without asking, each one reported here.",
+			label, code(req.RequesterMachine))
 		keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, []InlineKeyboardButton{
 			{Text: "🕗 Approve for " + label, CallbackData: fmt.Sprintf("session:%s", req.ID)},
 		})
@@ -151,7 +152,7 @@ func (c *Client) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL
 	return c.sendMessage(SendMessageRequest{
 		ChatID:      c.chatID,
 		Text:        text,
-		ParseMode:   "Markdown",
+		ParseMode:   "HTML",
 		ReplyMarkup: keyboard,
 	})
 }
@@ -160,25 +161,25 @@ func (c *Client) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL
 // approval window. It is silent, and carries the button that ends the window.
 func (c *Client) SendSessionRelease(req *models.ApprovalRequest) (int, error) {
 	text := fmt.Sprintf(
-		"🔓 *Secret Released (approval window)*\n\n"+
+		"🔓 <b>Secret Released (approval window)</b>\n\n"+
 			"%s"+
-			"*Machine:* `%s`\n"+
-			"*IP:* `%s`\n"+
-			"*Reason:* %s\n"+
-			"*Window ends:* %s\n\n"+
-			"*Request ID:* `%s`",
+			"<b>Machine:</b> %s\n"+
+			"<b>IP:</b> %s\n"+
+			"<b>Reason:</b> %s\n"+
+			"<b>Window ends:</b> %s\n\n"+
+			"<b>Request ID:</b> %s",
 		describeSecrets(req),
-		escapeMarkdown(req.RequesterMachine),
-		req.RequesterIP,
-		escapeMarkdown(defaultIfEmpty(req.Reason, "Not provided")),
+		code(req.RequesterMachine),
+		code(req.RequesterIP),
+		html.EscapeString(defaultIfEmpty(req.Reason, "Not provided")),
 		req.SessionExpiresAt.Format("15:04:05 MST"),
-		req.ID,
+		code(req.ID),
 	)
 
 	return c.sendMessage(SendMessageRequest{
 		ChatID:              c.chatID,
 		Text:                text,
-		ParseMode:           "Markdown",
+		ParseMode:           "HTML",
 		ReplyMarkup:         endSessionKeyboard(req.SessionID),
 		DisableNotification: true,
 	})
@@ -189,19 +190,19 @@ func (c *Client) SendSessionRelease(req *models.ApprovalRequest) (int, error) {
 // stillOpen is how many other windows of the machine stay open.
 func (c *Client) SendSessionEnded(machine, endedBy string, stillOpen int) error {
 	text := fmt.Sprintf(
-		"🔒 *Approval Window Ended*\n\n"+
-			"*Machine:* `%s`\n"+
-			"*Ended by:* %s\n\n"+
+		"🔒 <b>Approval Window Ended</b>\n\n"+
+			"<b>Machine:</b> %s\n"+
+			"<b>Ended by:</b> %s\n\n"+
 			"%s",
-		escapeMarkdown(machine),
-		escapeMarkdown(endedBy),
+		code(machine),
+		html.EscapeString(endedBy),
 		stillOpenNote(stillOpen),
 	)
 
 	_, err := c.sendMessage(SendMessageRequest{
 		ChatID:              c.chatID,
 		Text:                text,
-		ParseMode:           "Markdown",
+		ParseMode:           "HTML",
 		DisableNotification: true,
 	})
 	return err
@@ -222,17 +223,17 @@ func stillOpenNote(stillOpen int) string {
 // UpdateMessageApproved updates a message to show it was approved
 func (c *Client) UpdateMessageApproved(messageID int, req *models.ApprovalRequest, approver string) error {
 	text := fmt.Sprintf(
-		"✅ *Secret Access Approved*\n\n"+
-			"*Secret:* `%s`\n"+
-			"*Vault:* `%s`\n"+
-			"*Machine:* `%s`\n"+
-			"*Approved by:* @%s\n"+
-			"*Request ID:* `%s`",
-		escapeMarkdown(req.SecretName),
-		escapeMarkdown(req.Vault),
-		escapeMarkdown(req.RequesterMachine),
-		escapeMarkdown(approver),
-		req.ID,
+		"✅ <b>Secret Access Approved</b>\n\n"+
+			"<b>Secret:</b> %s\n"+
+			"<b>Vault:</b> %s\n"+
+			"<b>Machine:</b> %s\n"+
+			"<b>Approved by:</b> @%s\n"+
+			"<b>Request ID:</b> %s",
+		code(req.SecretName),
+		code(req.Vault),
+		code(req.RequesterMachine),
+		html.EscapeString(approver),
+		code(req.ID),
 	)
 
 	if req.SessionID == "" {
@@ -240,9 +241,9 @@ func (c *Client) UpdateMessageApproved(messageID int, req *models.ApprovalReques
 	}
 
 	text += fmt.Sprintf(
-		"\n\n*Approval window:* open until %s. Requests from `%s` are released without asking, each one reported here.",
+		"\n\n<b>Approval window:</b> open until %s. Requests from %s are released without asking, each one reported here.",
 		req.SessionExpiresAt.Format("15:04:05 MST"),
-		escapeMarkdown(req.RequesterMachine))
+		code(req.RequesterMachine))
 
 	return c.editMessage(messageID, text, endSessionKeyboard(req.SessionID))
 }
@@ -250,17 +251,17 @@ func (c *Client) UpdateMessageApproved(messageID int, req *models.ApprovalReques
 // UpdateMessageDenied updates a message to show it was denied
 func (c *Client) UpdateMessageDenied(messageID int, req *models.ApprovalRequest, denier string) error {
 	text := fmt.Sprintf(
-		"❌ *Secret Access Denied*\n\n"+
-			"*Secret:* `%s`\n"+
-			"*Vault:* `%s`\n"+
-			"*Machine:* `%s`\n"+
-			"*Denied by:* @%s\n"+
-			"*Request ID:* `%s`",
-		escapeMarkdown(req.SecretName),
-		escapeMarkdown(req.Vault),
-		escapeMarkdown(req.RequesterMachine),
-		escapeMarkdown(denier),
-		req.ID,
+		"❌ <b>Secret Access Denied</b>\n\n"+
+			"<b>Secret:</b> %s\n"+
+			"<b>Vault:</b> %s\n"+
+			"<b>Machine:</b> %s\n"+
+			"<b>Denied by:</b> @%s\n"+
+			"<b>Request ID:</b> %s",
+		code(req.SecretName),
+		code(req.Vault),
+		code(req.RequesterMachine),
+		html.EscapeString(denier),
+		code(req.ID),
 	)
 
 	return c.editMessage(messageID, text, nil)
@@ -434,26 +435,33 @@ func (c *Client) sendMessage(msgReq SendMessageRequest) (int, error) {
 // describeSecrets lists what a request asks for, as the first lines of a message.
 func describeSecrets(req *models.ApprovalRequest) string {
 	if len(req.Secrets) <= 1 {
-		return fmt.Sprintf("*Secret:* `%s`\n*Vault:* `%s`\n",
-			escapeMarkdown(req.SecretName), escapeMarkdown(req.Vault))
+		return fmt.Sprintf("<b>Secret:</b> %s\n<b>Vault:</b> %s\n",
+			code(req.SecretName), code(req.Vault))
 	}
 
-	list := fmt.Sprintf("*Secrets (%d items):*\n", len(req.Secrets))
+	list := fmt.Sprintf("<b>Secrets (%d items):</b>\n", len(req.Secrets))
 	for _, s := range req.Secrets {
 		vault := s.Vault
 		if vault == "" {
 			vault = "auto"
 		}
 		if len(s.Fields) > 0 {
-			list += fmt.Sprintf("  • `%s` (vault: %s, fields: %s)\n",
-				escapeMarkdown(s.SecretName), escapeMarkdown(vault),
-				escapeMarkdown(strings.Join(s.Fields, ", ")))
+			list += fmt.Sprintf("  • %s (vault: %s, fields: %s)\n",
+				code(s.SecretName), html.EscapeString(vault),
+				html.EscapeString(strings.Join(s.Fields, ", ")))
 		} else {
-			list += fmt.Sprintf("  • `%s` (vault: %s)\n",
-				escapeMarkdown(s.SecretName), escapeMarkdown(vault))
+			list += fmt.Sprintf("  • %s (vault: %s)\n",
+				code(s.SecretName), html.EscapeString(vault))
 		}
 	}
 	return list
+}
+
+// code shows a value as fixed-width text, exactly as given. The values come
+// from the requester, so they are escaped: they must not be able to end the
+// tag they sit in and change what the approver reads.
+func code(s string) string {
+	return "<code>" + html.EscapeString(s) + "</code>"
 }
 
 // endSessionKeyboard is the single button that ends an approval window.
@@ -482,7 +490,7 @@ func (c *Client) editMessage(messageID int, text string, keyboard *InlineKeyboar
 		ChatID:      c.chatID,
 		MessageID:   messageID,
 		Text:        text,
-		ParseMode:   "Markdown",
+		ParseMode:   "HTML",
 		ReplyMarkup: keyboard,
 	}
 
@@ -522,32 +530,6 @@ func withoutURL(err error) error {
 		return fmt.Errorf("%s: %w", urlErr.Op, urlErr.Err)
 	}
 	return err
-}
-
-func escapeMarkdown(s string) string {
-	// Simple escape for Markdown special characters
-	replacer := map[string]string{
-		"_": "\\_",
-		"*": "\\*",
-		"`": "\\`",
-		"[": "\\[",
-	}
-	for old, new := range replacer {
-		s = replaceAll(s, old, new)
-	}
-	return s
-}
-
-func replaceAll(s, old, new string) string {
-	result := ""
-	for _, c := range s {
-		if string(c) == old {
-			result += new
-		} else {
-			result += string(c)
-		}
-	}
-	return result
 }
 
 func defaultIfEmpty(s, def string) string {

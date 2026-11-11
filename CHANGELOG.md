@@ -16,6 +16,7 @@
 - **Exact title match** — a secret requested from a named vault is looked up by its exact title, so a name holding a double quote can no longer release a different item than the one shown in the approval message.
 - A request whose Telegram prompt cannot be sent now fails at once with `503 notify_failed` instead of waiting until it expires.
 - `OP_CONNECT_HOST` with a trailing slash no longer produces `//v1/...` paths that Connect rejects.
+- **Telegram messages are sent as HTML** with every value from the requester escaped. Before, a backtick in a secret name, machine name or the forwarded IP could end its code span and change what the approver read.
 
 ## v0.2.1 — Cross-Platform & SSH Fixes
 
