@@ -747,8 +747,8 @@ func OpenAPISpec() string {
   "openapi": "3.0.3",
   "info": {
     "title": "Secret Gate API",
-    "description": "Human-in-the-loop approval gateway for agent access to secrets. Requests are approved via Telegram before secrets are released. Supports both single-item (legacy) and batch secret requests.",
-    "version": "1.1.0"
+    "description": "Human-in-the-loop approval gateway for agent access to secrets. Requests are approved via Telegram before secrets are released. Supports both single-item (legacy) and batch secret requests. The approver can open an approval window for a machine, under which its later requests are released without a new approval and reported to the approver instead.",
+    "version": "1.2.0"
   },
   "servers": [
     {"url": "/", "description": "Relative to deployment URL"}
@@ -803,6 +803,14 @@ func OpenAPISpec() string {
                   "reason": {
                     "type": "string",
                     "description": "Reason for requesting access (shown in approval notification)"
+                  },
+                  "session": {
+                    "type": "boolean",
+                    "description": "Set when the client can hold an approval window. The approver is then also offered to approve for a period (SESSION_TTL), which requires 'machine' to be set."
+                  },
+                  "session_token": {
+                    "type": "string",
+                    "description": "Token of the approval window the client holds. If the window is open and was granted to the same 'machine', the request is approved at once and reported to the approver."
                   }
                 }
               },
@@ -841,11 +849,15 @@ func OpenAPISpec() string {
                     "token": {"type": "string", "description": "Unique token for this request. Use with /status/{token} and /secret/{token}."},
                     "status_url": {"type": "string", "description": "URL to poll for approval status"},
                     "expires_at": {"type": "string", "description": "ISO 8601 timestamp when this request expires"},
-                    "message": {"type": "string"}
+                    "message": {"type": "string"},
+                    "session_invalid": {"type": "boolean", "description": "True when the session_token that was presented no longer opens anything (expired, ended, or granted to another machine). The request then waits for approval as usual and the client should forget the token."}
                   }
                 }
               }
             }
+          },
+          "503": {
+            "description": "The request came under an open approval window but the approver could not be notified, so nothing was released. Try again."
           }
         }
       }
@@ -1029,7 +1041,8 @@ func OpenAPISpec() string {
                           "type": "object",
                           "additionalProperties": {"type": "string"},
                           "description": "Map of field labels to values for the single requested secret"
-                        }
+                        },
+                        "session": {"$ref": "#/components/schemas/SessionGrant"}
                       }
                     },
                     {
@@ -1043,7 +1056,8 @@ func OpenAPISpec() string {
                             "additionalProperties": {"type": "string"}
                           },
                           "description": "Map of secret names to their field label-value maps"
-                        }
+                        },
+                        "session": {"$ref": "#/components/schemas/SessionGrant"}
                       }
                     }
                   ]
@@ -1119,6 +1133,18 @@ func OpenAPISpec() string {
             "description": "OpenAPI 3.0 spec",
             "content": {"application/json": {}}
           }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "SessionGrant": {
+        "type": "object",
+        "description": "Present only on the secret whose approval opened an approval window. The client keeps the token in memory and presents it as session_token on later requests.",
+        "properties": {
+          "token": {"type": "string", "description": "Approval window token"},
+          "expires_at": {"type": "string", "description": "RFC 3339 timestamp when the window closes"}
         }
       }
     }
