@@ -11,7 +11,7 @@
 
 AI coding agents need credentials — SSH keys, API tokens, database passwords — but giving them free access to your secrets is a non-starter. Secret Gate puts you in control:
 
-- **Approve every secret access from your phone** via Telegram, with full context on what the agent needs and why
+- **Approve secret access from your phone** via Telegram, with full context on what the agent needs and why — one secret at a time, or one tap for a working period (see [Approval Window](#approval-window))
 - **Secrets never touch disk** — cached in memory only, with automatic expiry
 - **MCP integration** — agents use secrets without you approving every single shell command. One Telegram tap, then the agent runs autonomously
 - **Works with any AI coding tool** — Claude Code, Codex, Cline, OpenCode, Roo Code
@@ -54,7 +54,7 @@ One tap on your phone. Zero secrets on disk. Zero manual shell approvals. The ag
 
 1. Your AI coding agent detects it needs a credential
 2. The agent searches for the secret in 1Password via the Secret Gate server
-3. The agent requests access — you receive a Telegram notification with **Approve** / **Deny** buttons
+3. The agent requests access — you receive a Telegram notification with **Approve** / **Deny** buttons, plus **Approve for 8h** when the client can hold an [approval window](#approval-window)
 4. On approval, the agent retrieves the secret through a one-time-use token
 5. SSH keys are automatically added to ssh-agent with TTL-matched expiry; secrets are cached in memory by the local daemon
 
@@ -121,6 +121,7 @@ Then run the `server` binary with the required environment variables set.
 | `WEBHOOK_BASE_URL` | Yes | — | Public URL where this server is accessible |
 | `PORT` | No | `8080` | HTTP listen port |
 | `REQUEST_TTL` | No | `15m` | How long approval requests remain valid |
+| `SESSION_TTL` | No | `8h` | Length of an [approval window](#approval-window). `0` turns the feature off |
 | `CLEANUP_INTERVAL` | No | `5m` | Interval for cleaning up expired requests |
 
 ## Client Installation
@@ -244,16 +245,34 @@ The client includes a background daemon that caches approved secrets in memory, 
 
 - The daemon starts automatically on the first secret request
 - Secrets are cached for the configured `cache_ttl` (default: 1 hour)
-- The daemon exits automatically after `daemon_idle_timeout` of inactivity (default: 5 minutes)
+- The daemon exits automatically after `daemon_idle_timeout` of inactivity (default: 5 minutes). It stays up while it still holds a cached secret or an open [approval window](#approval-window)
 - Communication between the client and daemon uses a Unix socket with `0600` permissions
 
 **Daemon commands:**
 
 ```bash
-secret-gate daemon status    # Check daemon status and cache entries
-secret-gate daemon flush     # Clear all cached secrets
+secret-gate daemon status    # Check daemon status, cache entries and open approval windows
+secret-gate daemon flush     # Clear all cached secrets and forget approval windows
 secret-gate daemon stop      # Stop the daemon
 ```
+
+## Approval Window
+
+Approving every secret one by one gets tiring during a long working session. When a request comes from a client with a daemon, the Telegram message has a third button, **Approve for 8h**. It approves that request and opens an approval window for the requesting machine:
+
+- Until the window closes, later requests from that machine are released without a new tap, whatever secret they ask for.
+- Every such release is reported in the chat with a silent message that carries an **End approval window** button. Tapping it closes every window of that machine at once; requests already released stay released.
+- A plain **Approve** still approves only the one request and opens nothing.
+- The window is a random token that the daemon keeps in memory and presents with each request. It is bound to the machine name the client reports and to one gate server URL.
+- `daemon flush` and `daemon stop` make the machine forget the token, but the window stays open on the gate until it expires or you end it from Telegram.
+- Windows live in the server's memory, so a server restart closes all of them.
+- A release that cannot be reported to Telegram is refused.
+- Under a window, a secret requested without a vault must be named by its exact title, and that title must belong to one item only across all vaults. A name that only comes close is reported in the chat but nothing is handed out; the error names the closest title.
+- If the approval message cannot be updated to show the window and its end button, the tap approves that one request and opens no window.
+- If the secret whose approval opened the window cannot be fetched, that window is closed again and the chat says so. Other windows of the machine stay open.
+- `--no-cache` neither asks for a window nor uses an open one.
+
+The window length is set on the server with `SESSION_TTL` (default `8h`); `SESSION_TTL=0` removes the button.
 
 ## API Reference
 
@@ -268,6 +287,8 @@ secret-gate daemon stop      # Stop the daemon
 | `GET` | `/health` | None | Health check |
 | `GET` | `/openapi.json` | None | Full OpenAPI 3.0 specification |
 
+A client that can hold an approval window sends `"session": true` with `/request`, and `"session_token"` once it holds one. `/secret/{token}` returns the window as `"session": {"token", "expires_at"}` with the secret whose approval opened it. If the gate no longer honours a presented token, `/request` answers with `"session_invalid": true` and waits for approval as usual.
+
 For detailed request/response schemas, see the OpenAPI spec at `/openapi.json` on a running server.
 
 ## Security
@@ -276,7 +297,8 @@ For detailed request/response schemas, see the OpenAPI spec at `/openapi.json` o
 - **No secrets in agent context.** MCP tools execute commands with secrets injected as env vars — the agent never sees the actual values.
 - **Unix socket IPC.** The daemon listens on a Unix socket with `0600` permissions, accessible only to the owning user.
 - **SSH agent integration.** SSH keys are added to ssh-agent with a TTL that matches the cache expiry, so they are automatically removed. If the agent is unavailable or disabled, `ssh_with_secret` gives the key to `ssh -i` through a temp file that is deleted when the command ends.
-- **Telegram approval gate.** Every secret access requires explicit human approval through Telegram inline buttons.
+- **Telegram approval gate.** Every secret access requires explicit human approval through Telegram inline buttons, unless you opened an approval window for that machine.
+- **Approval windows are a trade-off.** While a window is open, whoever holds its token and reports the same machine name can get any secret the gate can reach, without a tap. The token lives only in the daemon's memory, every release is reported to Telegram, and one tap ends the window. Use plain **Approve**, or set `SESSION_TTL=0`, where that trade is not acceptable.
 - **One-time tokens.** Secret retrieval tokens can only be used once. A second fetch returns an error.
 - **Configurable TTL.** All approval requests expire after a configurable duration (default: 15 minutes).
 

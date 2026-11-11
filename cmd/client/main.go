@@ -23,6 +23,9 @@ type RequestPayload struct {
 	Vault      string `json:"vault,omitempty"`
 	Machine    string `json:"machine"`
 	Reason     string `json:"reason,omitempty"`
+
+	Session      bool   `json:"session,omitempty"`       // the client can hold an approval window
+	SessionToken string `json:"session_token,omitempty"` // the window it already holds
 }
 
 // SearchPayload is sent to search for secrets
@@ -51,6 +54,10 @@ type RequestResponse struct {
 	StatusURL string `json:"status_url"`
 	ExpiresAt string `json:"expires_at"`
 	Message   string `json:"message"`
+
+	// SessionInvalid reports that the gate no longer honours the approval
+	// window that was presented.
+	SessionInvalid bool `json:"session_invalid,omitempty"`
 }
 
 // StatusResponse is returned when checking status
@@ -62,7 +69,8 @@ type StatusResponse struct {
 
 // SecretResponse contains the retrieved secret
 type SecretResponse struct {
-	Secret map[string]string `json:"secret"`
+	Secret  map[string]string `json:"secret"`
+	Session *SessionGrant     `json:"session,omitempty"`
 }
 
 // ErrorResponse is returned on errors
@@ -246,10 +254,21 @@ func main() {
 		Reason:     *reason,
 	}
 
+	// The daemon is what holds an approval window, so only ask for one when
+	// there is a daemon.
+	if daemonClient != nil {
+		presentWindow(daemonClient, *server, &payload)
+	}
+
 	reqResp, err := submitRequest(*server, payload)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error submitting request: %v\n", err)
 		os.Exit(1)
+	}
+
+	// The gate no longer honours the window that was presented: forget it.
+	if reqResp.SessionInvalid && daemonClient != nil {
+		_ = daemonClient.ClearSession(*server, payload.SessionToken)
 	}
 
 	fmt.Fprintf(os.Stderr, "Request submitted. Waiting for approval...\n")
@@ -305,6 +324,16 @@ func main() {
 		cacheTTLSec := int(cfg.CacheTTL.Seconds())
 		if err := daemonClient.Store(*secret, *vault, secretResp.Secret, cacheTTLSec); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to cache secret: %v\n", err)
+		}
+
+		if secretResp.Session != nil {
+			until, err := keepWindow(daemonClient, *server, *secretResp.Session)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: the approver opened an approval window but it could not be kept: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "Approval window open until %s: further requests from this machine are released without a new approval, and each one is reported to the approver.\n",
+					until.Local().Format("15:04 MST"))
+			}
 		}
 	}
 
@@ -418,6 +447,9 @@ func handleDaemonSubcommand(args []string) {
 		fmt.Printf("  Uptime:   %s\n", status.Uptime)
 		fmt.Printf("  Entries:  %d\n", status.EntryCount)
 		fmt.Printf("  Socket:   %s\n", status.SocketPath)
+		for _, window := range status.Sessions {
+			fmt.Printf("  Window:   %s until %s\n", window.Server, window.ExpiresAt.Local().Format("2006-01-02 15:04 MST"))
+		}
 
 	case "flush":
 		client := daemon.NewClient(daemon.SocketPath())
@@ -425,11 +457,15 @@ func handleDaemonSubcommand(args []string) {
 			fmt.Println("Daemon is not running.")
 			return
 		}
+		before, _ := client.Status()
 		if err := client.Flush(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("Cache flushed.")
+		if before != nil && len(before.Sessions) > 0 {
+			fmt.Println("Approval windows forgotten on this machine. They are still open on the gate until they expire or the approver ends them from Telegram.")
+		}
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown daemon command: %s\n", args[0])

@@ -73,6 +73,17 @@ The secret-gate client includes a background daemon that caches approved secrets
 - The daemon starts automatically on first use and exits when idle
 - Use `--no-cache` to bypass the cache for a specific request
 
+### Approval window
+
+The approver can answer a request with **Approve for 8h** instead of **Approve**. That opens an approval window for this machine: until it closes, further requests from this machine are released without a new tap, and each one is reported to the approver in Telegram, who can end the window at any time.
+
+- The client says so on stderr ("Approval window open until ...") and `daemon status` lists it
+- No such line means no window: for example the secret could not be fetched, and the next request asks for approval again
+- An open window changes nothing about the rules below: still give a real reason for every request, still ask only for the field you need, still report what you used
+- Do not fetch secrets just because a window is open — the approver sees every release
+- Under an open window, name the secret by its exact title (take it from the search results): a name that only comes close is refused, and the error names the closest title
+- `--no-cache` neither asks for a window nor uses an open one
+
 ## Workflow
 
 ### Step 1: Search for the secret
@@ -191,7 +202,7 @@ $SG_CLIENT --server "$SG_SERVER" --secret "my-key" --vault "Infrastructure" --re
 $SG_CLIENT --server "$SG_SERVER" --secret "my-key" --field "password" --reason "rotate" --no-cache
 
 # Daemon management
-$SG_CLIENT daemon status     # Check daemon status and cache entries
-$SG_CLIENT daemon flush      # Clear all cached secrets
+$SG_CLIENT daemon status     # Check daemon status, cache entries and open approval windows
+$SG_CLIENT daemon flush      # Clear all cached secrets and forget approval windows
 $SG_CLIENT daemon stop       # Stop the daemon
 ```

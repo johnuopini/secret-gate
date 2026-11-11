@@ -36,6 +36,8 @@ func TestTransportErrors_DoNotContainBotToken(t *testing.T) {
 		"UpdateMessageApproved": func(c *Client) error {
 			return c.UpdateMessageApproved(7, req, "approver")
 		},
+		"SendSessionRelease": func(c *Client) error { _, err := c.SendSessionRelease(req); return err },
+		"SendSessionEnded":   func(c *Client) error { return c.SendSessionEnded("devvm", "approver", 0) },
 	}
 
 	for name, call := range calls {

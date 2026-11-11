@@ -13,6 +13,7 @@ import (
 type Server struct {
 	socketPath string
 	cache      *Cache
+	sessions   *sessionSet
 	cacheTTL   time.Duration
 	startedAt  time.Time
 	listener   net.Listener
@@ -25,6 +26,7 @@ func NewServer(socketPath string, cacheTTL time.Duration) *Server {
 	return &Server{
 		socketPath: socketPath,
 		cache:      NewCache(),
+		sessions:   newSessionSet(),
 		cacheTTL:   cacheTTL,
 		startedAt:  time.Now(),
 		stopCh:     make(chan struct{}),
@@ -107,6 +109,12 @@ func (s *Server) handleRequest(req Request) Response {
 		return s.handleFlush()
 	case CmdStatus:
 		return s.handleStatus()
+	case CmdSessionGet:
+		return s.handleSessionGet(req)
+	case CmdSessionSet:
+		return s.handleSessionSet(req)
+	case CmdSessionClear:
+		return s.handleSessionClear(req)
 	case CmdStop:
 		go func() {
 			time.Sleep(100 * time.Millisecond)
@@ -141,6 +149,7 @@ func (s *Server) handleList() Response {
 
 func (s *Server) handleFlush() Response {
 	s.cache.Flush()
+	s.sessions.flush()
 	return Response{OK: true}
 }
 
@@ -152,8 +161,44 @@ func (s *Server) handleStatus() Response {
 			EntryCount: s.cache.Count(),
 			SocketPath: s.socketPath,
 			PID:        os.Getpid(),
+			Sessions:   s.sessions.live(),
 		},
 	}
+}
+
+// handleSessionGet returns the live approval window held for a gate server,
+// or no window at all.
+func (s *Server) handleSessionGet(req Request) Response {
+	if req.Session == nil || req.Session.Server == "" {
+		return Response{Error: "session server is required"}
+	}
+	info, ok := s.sessions.get(req.Session.Server)
+	if !ok {
+		return Response{OK: true}
+	}
+	return Response{OK: true, Session: &info}
+}
+
+func (s *Server) handleSessionSet(req Request) Response {
+	if req.Session == nil || req.Session.Server == "" || req.Session.Token == "" {
+		return Response{Error: "session server and token are required"}
+	}
+	s.sessions.set(*req.Session)
+	return Response{OK: true}
+}
+
+func (s *Server) handleSessionClear(req Request) Response {
+	if req.Session == nil || req.Session.Server == "" || req.Session.Token == "" {
+		return Response{Error: "session server and token are required"}
+	}
+	s.sessions.clear(req.Session.Server, req.Session.Token)
+	return Response{OK: true}
+}
+
+// busy reports whether the daemon still holds something worth staying alive
+// for: a cached secret or an open approval window.
+func (s *Server) busy() bool {
+	return s.cache.HasValidEntries() || len(s.sessions.live()) > 0
 }
 
 func (s *Server) writeResponse(conn net.Conn, resp Response) {
@@ -174,6 +219,7 @@ func (s *Server) cleanupLoop() {
 			return
 		case <-ticker.C:
 			s.cache.Cleanup()
+			s.sessions.live()
 		}
 	}
 }

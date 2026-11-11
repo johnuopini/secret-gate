@@ -24,6 +24,10 @@ type Config struct {
 	RequestTTL      time.Duration
 	CleanupInterval time.Duration
 
+	// SessionTTL is how long an approval window stays open once the approver
+	// grants one. Zero means windows are never offered.
+	SessionTTL time.Duration
+
 	// Webhook settings
 	WebhookBaseURL string
 }
@@ -48,6 +52,15 @@ func Load() (*Config, error) {
 			return nil, errors.New("invalid TELEGRAM_CHAT_ID: must be an integer")
 		}
 		cfg.TelegramChatID = chatID
+	}
+
+	cfg.SessionTTL = 8 * time.Hour
+	if value := os.Getenv("SESSION_TTL"); value != "" {
+		ttl, err := time.ParseDuration(value)
+		if err != nil {
+			return nil, errors.New("invalid SESSION_TTL: must be a duration like 8h, or 0 to disable")
+		}
+		cfg.SessionTTL = max(ttl, 0)
 	}
 
 	return cfg, nil

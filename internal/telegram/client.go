@@ -56,6 +56,8 @@ type SendMessageRequest struct {
 	Text        string                `json:"text"`
 	ParseMode   string                `json:"parse_mode,omitempty"`
 	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+
+	DisableNotification bool `json:"disable_notification,omitempty"`
 }
 
 // EditMessageTextRequest represents a request to edit a message
@@ -111,28 +113,6 @@ func New(token string, chatID int64) *Client {
 
 // SendApprovalRequest sends an approval request message with approve/deny buttons
 func (c *Client) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL string) (int, error) {
-	var secretsList string
-	if len(req.Secrets) > 1 {
-		secretsList = fmt.Sprintf("*Secrets (%d items):*\n", len(req.Secrets))
-		for _, s := range req.Secrets {
-			vault := s.Vault
-			if vault == "" {
-				vault = "auto"
-			}
-			if len(s.Fields) > 0 {
-				secretsList += fmt.Sprintf("  • `%s` (vault: %s, fields: %s)\n",
-					escapeMarkdown(s.SecretName), escapeMarkdown(vault),
-					escapeMarkdown(strings.Join(s.Fields, ", ")))
-			} else {
-				secretsList += fmt.Sprintf("  • `%s` (vault: %s)\n",
-					escapeMarkdown(s.SecretName), escapeMarkdown(vault))
-			}
-		}
-	} else {
-		secretsList = fmt.Sprintf("*Secret:* `%s`\n*Vault:* `%s`\n",
-			escapeMarkdown(req.SecretName), escapeMarkdown(req.Vault))
-	}
-
 	text := fmt.Sprintf(
 		"🔐 *Secret Access Request*\n\n"+
 			"%s"+
@@ -141,7 +121,7 @@ func (c *Client) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL
 			"*Reason:* %s\n"+
 			"*Expires:* %s\n\n"+
 			"*Request ID:* `%s`",
-		secretsList,
+		describeSecrets(req),
 		escapeMarkdown(req.RequesterMachine),
 		req.RequesterIP,
 		escapeMarkdown(defaultIfEmpty(req.Reason, "Not provided")),
@@ -158,44 +138,85 @@ func (c *Client) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL
 		},
 	}
 
-	msgReq := SendMessageRequest{
+	if req.SessionTTL > 0 {
+		label := windowLabel(req.SessionTTL)
+		text += fmt.Sprintf(
+			"\n\n*Approve for %s:* later requests from `%s` are released without asking, each one reported here.",
+			label, escapeMarkdown(req.RequesterMachine))
+		keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, []InlineKeyboardButton{
+			{Text: "🕗 Approve for " + label, CallbackData: fmt.Sprintf("session:%s", req.ID)},
+		})
+	}
+
+	return c.sendMessage(SendMessageRequest{
 		ChatID:      c.chatID,
 		Text:        text,
 		ParseMode:   "Markdown",
 		ReplyMarkup: keyboard,
-	}
+	})
+}
 
-	body, err := json.Marshal(msgReq)
-	if err != nil {
-		return 0, fmt.Errorf("marshaling request: %w", err)
-	}
+// SendSessionRelease reports a request that was released under an open
+// approval window. It is silent, and carries the button that ends the window.
+func (c *Client) SendSessionRelease(req *models.ApprovalRequest) (int, error) {
+	text := fmt.Sprintf(
+		"🔓 *Secret Released (approval window)*\n\n"+
+			"%s"+
+			"*Machine:* `%s`\n"+
+			"*IP:* `%s`\n"+
+			"*Reason:* %s\n"+
+			"*Window ends:* %s\n\n"+
+			"*Request ID:* `%s`",
+		describeSecrets(req),
+		escapeMarkdown(req.RequesterMachine),
+		req.RequesterIP,
+		escapeMarkdown(defaultIfEmpty(req.Reason, "Not provided")),
+		req.SessionExpiresAt.Format("15:04:05 MST"),
+		req.ID,
+	)
 
-	resp, err := c.httpClient.Post(c.baseURL+"/sendMessage", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return 0, fmt.Errorf("sending message: %w", withoutURL(err))
-	}
-	defer resp.Body.Close()
+	return c.sendMessage(SendMessageRequest{
+		ChatID:              c.chatID,
+		Text:                text,
+		ParseMode:           "Markdown",
+		ReplyMarkup:         endSessionKeyboard(req.SessionID),
+		DisableNotification: true,
+	})
+}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, fmt.Errorf("reading response: %w", err)
-	}
+// SendSessionEnded reports that approval windows of a machine were ended.
+// endedBy is shown as given: "@name" for a person, or the gate and its reason.
+// stillOpen is how many other windows of the machine stay open.
+func (c *Client) SendSessionEnded(machine, endedBy string, stillOpen int) error {
+	text := fmt.Sprintf(
+		"🔒 *Approval Window Ended*\n\n"+
+			"*Machine:* `%s`\n"+
+			"*Ended by:* %s\n\n"+
+			"%s",
+		escapeMarkdown(machine),
+		escapeMarkdown(endedBy),
+		stillOpenNote(stillOpen),
+	)
 
-	var apiResp APIResponse
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return 0, fmt.Errorf("parsing response: %w", err)
-	}
+	_, err := c.sendMessage(SendMessageRequest{
+		ChatID:              c.chatID,
+		Text:                text,
+		ParseMode:           "Markdown",
+		DisableNotification: true,
+	})
+	return err
+}
 
-	if !apiResp.OK {
-		return 0, fmt.Errorf("telegram API error: %s", apiResp.Description)
+// stillOpenNote tells the approver whether the machine still has open windows.
+func stillOpenNote(stillOpen int) string {
+	switch stillOpen {
+	case 0:
+		return "The next request from this machine asks for approval again."
+	case 1:
+		return "1 other approval window of this machine stays open. The End button of any of them closes them all."
+	default:
+		return fmt.Sprintf("%d other approval windows of this machine stay open. The End button of any of them closes them all.", stillOpen)
 	}
-
-	var msg Message
-	if err := json.Unmarshal(apiResp.Result, &msg); err != nil {
-		return 0, fmt.Errorf("parsing message: %w", err)
-	}
-
-	return msg.MessageID, nil
 }
 
 // UpdateMessageApproved updates a message to show it was approved
@@ -214,7 +235,16 @@ func (c *Client) UpdateMessageApproved(messageID int, req *models.ApprovalReques
 		req.ID,
 	)
 
-	return c.editMessage(messageID, text, nil)
+	if req.SessionID == "" {
+		return c.editMessage(messageID, text, nil)
+	}
+
+	text += fmt.Sprintf(
+		"\n\n*Approval window:* open until %s. Requests from `%s` are released without asking, each one reported here.",
+		req.SessionExpiresAt.Format("15:04:05 MST"),
+		escapeMarkdown(req.RequesterMachine))
+
+	return c.editMessage(messageID, text, endSessionKeyboard(req.SessionID))
 }
 
 // UpdateMessageDenied updates a message to show it was denied
@@ -364,6 +394,87 @@ func (c *Client) PollUpdates(handler CallbackHandler) {
 			}
 		}
 	}
+}
+
+// sendMessage posts a message to the chat and returns its message ID.
+func (c *Client) sendMessage(msgReq SendMessageRequest) (int, error) {
+	body, err := json.Marshal(msgReq)
+	if err != nil {
+		return 0, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	resp, err := c.httpClient.Post(c.baseURL+"/sendMessage", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("sending message: %w", withoutURL(err))
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("reading response: %w", err)
+	}
+
+	var apiResp APIResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return 0, fmt.Errorf("parsing response: %w", err)
+	}
+
+	if !apiResp.OK {
+		return 0, fmt.Errorf("telegram API error: %s", apiResp.Description)
+	}
+
+	var msg Message
+	if err := json.Unmarshal(apiResp.Result, &msg); err != nil {
+		return 0, fmt.Errorf("parsing message: %w", err)
+	}
+
+	return msg.MessageID, nil
+}
+
+// describeSecrets lists what a request asks for, as the first lines of a message.
+func describeSecrets(req *models.ApprovalRequest) string {
+	if len(req.Secrets) <= 1 {
+		return fmt.Sprintf("*Secret:* `%s`\n*Vault:* `%s`\n",
+			escapeMarkdown(req.SecretName), escapeMarkdown(req.Vault))
+	}
+
+	list := fmt.Sprintf("*Secrets (%d items):*\n", len(req.Secrets))
+	for _, s := range req.Secrets {
+		vault := s.Vault
+		if vault == "" {
+			vault = "auto"
+		}
+		if len(s.Fields) > 0 {
+			list += fmt.Sprintf("  • `%s` (vault: %s, fields: %s)\n",
+				escapeMarkdown(s.SecretName), escapeMarkdown(vault),
+				escapeMarkdown(strings.Join(s.Fields, ", ")))
+		} else {
+			list += fmt.Sprintf("  • `%s` (vault: %s)\n",
+				escapeMarkdown(s.SecretName), escapeMarkdown(vault))
+		}
+	}
+	return list
+}
+
+// endSessionKeyboard is the single button that ends an approval window.
+func endSessionKeyboard(sessionID string) *InlineKeyboardMarkup {
+	return &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{{Text: "🔒 End approval window", CallbackData: "endsession:" + sessionID}},
+		},
+	}
+}
+
+// windowLabel renders a window length the short way: 8h, 30m, 1h30m.
+func windowLabel(ttl time.Duration) string {
+	label := ttl.Round(time.Second).String()
+	if strings.HasSuffix(label, "m0s") {
+		label = strings.TrimSuffix(label, "0s")
+	}
+	if strings.HasSuffix(label, "h0m") {
+		label = strings.TrimSuffix(label, "0m")
+	}
+	return label
 }
 
 func (c *Client) editMessage(messageID int, text string, keyboard *InlineKeyboardMarkup) error {
