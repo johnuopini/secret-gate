@@ -125,6 +125,46 @@ func (c *Client) Flush() error {
 	return nil
 }
 
+// Session returns the live approval window the daemon holds for a gate
+// server, or nil when it holds none.
+func (c *Client) Session(server string) (*SessionInfo, error) {
+	resp, err := c.send(Request{Command: CmdSessionGet, Session: &SessionInfo{Server: server}})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("%s", resp.Error)
+	}
+	return resp.Session, nil
+}
+
+// SetSession hands the daemon an approval window to hold for a gate server.
+func (c *Client) SetSession(server, token string, expiresAt time.Time) error {
+	resp, err := c.send(Request{
+		Command: CmdSessionSet,
+		Session: &SessionInfo{Server: server, Token: token, ExpiresAt: expiresAt},
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
+}
+
+// ClearSession makes the daemon forget the approval window of a gate server.
+func (c *Client) ClearSession(server string) error {
+	resp, err := c.send(Request{Command: CmdSessionClear, Session: &SessionInfo{Server: server}})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
+}
+
 func (c *Client) StopDaemon() error {
 	resp, err := c.send(Request{Command: CmdStop})
 	if err != nil {

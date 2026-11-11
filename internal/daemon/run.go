@@ -33,7 +33,7 @@ func RunDaemon(socketPath string, cacheTTLSeconds int, idleTimeoutSeconds int) e
 		errCh <- srv.Run()
 	}()
 
-	// Idle monitor — check periodically if cache is empty
+	// Idle monitor — check periodically if the daemon still holds anything
 	idleTicker := time.NewTicker(30 * time.Second)
 	defer idleTicker.Stop()
 	lastActivity := time.Now()
@@ -46,7 +46,7 @@ func RunDaemon(socketPath string, cacheTTLSeconds int, idleTimeoutSeconds int) e
 			srv.Stop()
 			return nil
 		case <-idleTicker.C:
-			if srv.cache.HasValidEntries() {
+			if srv.busy() {
 				lastActivity = time.Now()
 			} else if time.Since(lastActivity) > idleTimeout {
 				srv.Stop()
