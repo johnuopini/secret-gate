@@ -224,13 +224,11 @@ func stillOpenNote(stillOpen int) string {
 func (c *Client) UpdateMessageApproved(messageID int, req *models.ApprovalRequest, approver string) error {
 	text := fmt.Sprintf(
 		"✅ <b>Secret Access Approved</b>\n\n"+
-			"<b>Secret:</b> %s\n"+
-			"<b>Vault:</b> %s\n"+
+			"%s"+
 			"<b>Machine:</b> %s\n"+
 			"<b>Approved by:</b> @%s\n"+
 			"<b>Request ID:</b> %s",
-		code(req.SecretName),
-		code(req.Vault),
+		describeSecrets(req),
 		code(req.RequesterMachine),
 		html.EscapeString(approver),
 		code(req.ID),
@@ -252,13 +250,11 @@ func (c *Client) UpdateMessageApproved(messageID int, req *models.ApprovalReques
 func (c *Client) UpdateMessageDenied(messageID int, req *models.ApprovalRequest, denier string) error {
 	text := fmt.Sprintf(
 		"❌ <b>Secret Access Denied</b>\n\n"+
-			"<b>Secret:</b> %s\n"+
-			"<b>Vault:</b> %s\n"+
+			"%s"+
 			"<b>Machine:</b> %s\n"+
 			"<b>Denied by:</b> @%s\n"+
 			"<b>Request ID:</b> %s",
-		code(req.SecretName),
-		code(req.Vault),
+		describeSecrets(req),
 		code(req.RequesterMachine),
 		html.EscapeString(denier),
 		code(req.ID),

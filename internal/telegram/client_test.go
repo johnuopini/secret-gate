@@ -66,6 +66,30 @@ func TestMessages_ShowEveryRequestValueExactlyAsSent(t *testing.T) {
 	}
 }
 
+func TestAnsweredMessages_ListEverySecretOfABatch(t *testing.T) {
+	c, calls := recordingAPI(t)
+	req := testRequest()
+	req.Secrets = []models.SecretRequest{
+		{SecretName: "db", Vault: "HomeLab"},
+		{SecretName: "llm-proxy", Fields: []string{"password"}},
+	}
+
+	c.UpdateMessageApproved(77, req, "approver")
+	c.UpdateMessageDenied(77, req, "approver")
+
+	if len(*calls) != 2 {
+		t.Fatalf("sent %d edits, want 2", len(*calls))
+	}
+	for i, call := range *calls {
+		text := call.Body["text"].(string)
+		for _, name := range []string{"<code>db</code>", "<code>llm-proxy</code>"} {
+			if !strings.Contains(text, name) {
+				t.Errorf("%s #%d does not show %s:\n%s", call.Method, i, name, text)
+			}
+		}
+	}
+}
+
 func TestTransportErrors_DoNotContainBotToken(t *testing.T) {
 	req := &models.ApprovalRequest{ID: "req-1", SecretName: "db", Vault: "HomeLab", ExpiresAt: time.Now()}
 
