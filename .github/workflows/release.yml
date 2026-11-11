@@ -37,12 +37,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # QEMU runs the arm64 final stage; the Go build itself cross-compiles natively
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
       - name: Build and push Docker image
         run: |
-          docker build -t ghcr.io/johnuopini/secret-gate:${{ github.ref_name }} .
-          docker tag ghcr.io/johnuopini/secret-gate:${{ github.ref_name }} ghcr.io/johnuopini/secret-gate:latest
-          docker push ghcr.io/johnuopini/secret-gate:${{ github.ref_name }}
-          docker push ghcr.io/johnuopini/secret-gate:latest
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -t ghcr.io/johnuopini/secret-gate:${{ github.ref_name }} \
+            -t ghcr.io/johnuopini/secret-gate:latest \
+            --push .
 
       - name: Extract changelog
         id: changelog
