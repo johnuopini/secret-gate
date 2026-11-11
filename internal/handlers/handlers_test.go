@@ -127,6 +127,25 @@ func TestRequest_AsksTheApproverAndWaits(t *testing.T) {
 	}
 }
 
+func TestRequest_WhenTheApproverCannotBeAsked_IsRefused(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	gate.Notifier.FailPrompts()
+
+	code, reply := ask(t, gate, handlers.BatchRequestPayload{
+		SecretName: "llm-proxy",
+		Vault:      gatetest.Vault,
+		Machine:    "devvm",
+		Reason:     "test",
+	})
+
+	if code != http.StatusServiceUnavailable {
+		t.Errorf("POST /request = %d, want %d", code, http.StatusServiceUnavailable)
+	}
+	if reply.Token != "" {
+		t.Error("gate handed out a request token that no one was asked to approve")
+	}
+}
+
 func TestApprove_ReleasesTheSecretOnce(t *testing.T) {
 	gate := gatetest.Start(t, vault)
 	reply := askFor(t, gate, "llm-proxy")

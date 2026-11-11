@@ -105,10 +105,18 @@ type Notifier struct {
 	endedBy        []string
 	endedStillOpen []int
 	answers        []string
+	failPrompts    bool
 	failReleases   bool
 	failEdits      bool
 	onPrompt       func(requestID string)
 	onRelease      func()
+}
+
+// FailPrompts makes every later approval prompt fail to send.
+func (n *Notifier) FailPrompts() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.failPrompts = true
 }
 
 // FailReleases makes every later release notice fail to send.
@@ -210,6 +218,10 @@ func (n *Notifier) lastAnswer() string {
 // SendApprovalRequest implements handlers.Notifier.
 func (n *Notifier) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL string) (int, error) {
 	n.mu.Lock()
+	if n.failPrompts {
+		n.mu.Unlock()
+		return 0, errors.New("telegram is unreachable")
+	}
 	n.prompts = append(n.prompts, *req)
 	messageID := len(n.prompts)
 	onPrompt := n.onPrompt

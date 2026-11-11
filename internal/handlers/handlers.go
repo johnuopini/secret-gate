@@ -237,14 +237,17 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send Telegram notification
+	// Ask the approver. A request no one was shown can never be approved, so
+	// the client is told now instead of polling until it expires.
 	msgID, err := h.notifier.SendApprovalRequest(req, h.config.WebhookBaseURL)
 	if err != nil {
 		h.log.Error("Failed to send Telegram notification", logger.F("error", err.Error(), "request_id", req.ID))
-	} else {
-		req.TelegramMsgID = msgID
-		h.store.Update(req)
+		h.store.Delete(req.Token)
+		h.writeError(w, http.StatusServiceUnavailable, "notify_failed", "Could not send the approval request to Telegram. Try again.")
+		return
 	}
+	req.TelegramMsgID = msgID
+	h.store.Update(req)
 
 	h.log.Info("Created approval request", logger.F(
 		"request_id", req.ID,
@@ -952,7 +955,7 @@ func OpenAPISpec() string {
             }
           },
           "503": {
-            "description": "The request came under an open approval window but the approver could not be notified, so nothing was released. Try again."
+            "description": "The approver could not be reached on Telegram, so the request was not created (or, under an open approval window, nothing was released). Try again."
           }
         }
       }
