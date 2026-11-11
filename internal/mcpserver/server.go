@@ -34,6 +34,12 @@ type FullDaemonClient interface {
 	Get(secretName, vault string) (map[string]string, error)
 	Store(secretName, vault string, fields map[string]string, ttl int) error
 	EnsureRunning() error
+
+	// Session returns the token of the approval window held for a gate
+	// server, or "" when none is held.
+	Session(server string) (string, error)
+	SetSession(server, token string, expiresAt time.Time) error
+	ClearSession(server string) error
 }
 
 // ProxyClient provides HTTP proxy access to the secret-gate server.
@@ -554,6 +560,22 @@ func (r *realDaemonClient) Get(secretName, vault string) (map[string]string, err
 
 func (r *realDaemonClient) Store(secretName, vault string, fields map[string]string, ttl int) error {
 	return r.client.Store(secretName, vault, fields, ttl)
+}
+
+func (r *realDaemonClient) Session(server string) (string, error) {
+	info, err := r.client.Session(server)
+	if err != nil || info == nil {
+		return "", err
+	}
+	return info.Token, nil
+}
+
+func (r *realDaemonClient) SetSession(server, token string, expiresAt time.Time) error {
+	return r.client.SetSession(server, token, expiresAt)
+}
+
+func (r *realDaemonClient) ClearSession(server string) error {
+	return r.client.ClearSession(server)
 }
 
 func (r *realDaemonClient) EnsureRunning() error {

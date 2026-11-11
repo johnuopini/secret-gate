@@ -61,17 +61,20 @@ type fieldsResponse struct {
 }
 
 type requestPayload struct {
-	SecretName string `json:"secret_name"`
-	Vault      string `json:"vault,omitempty"`
-	Machine    string `json:"machine"`
-	Reason     string `json:"reason,omitempty"`
+	SecretName   string `json:"secret_name"`
+	Vault        string `json:"vault,omitempty"`
+	Machine      string `json:"machine"`
+	Reason       string `json:"reason,omitempty"`
+	Session      bool   `json:"session,omitempty"`       // the client can hold an approval window
+	SessionToken string `json:"session_token,omitempty"` // the window it already holds
 }
 
 type requestResponse struct {
-	Token     string `json:"token"`
-	StatusURL string `json:"status_url"`
-	ExpiresAt string `json:"expires_at"`
-	Message   string `json:"message"`
+	Token          string `json:"token"`
+	StatusURL      string `json:"status_url"`
+	ExpiresAt      string `json:"expires_at"`
+	Message        string `json:"message"`
+	SessionInvalid bool   `json:"session_invalid,omitempty"`
 }
 
 type statusResponse struct {
@@ -80,8 +83,16 @@ type statusResponse struct {
 	SecretURL string `json:"secret_url,omitempty"`
 }
 
+// sessionGrant is the approval window the gate hands over with the secret
+// whose approval opened it.
+type sessionGrant struct {
+	Token     string `json:"token"`
+	ExpiresAt string `json:"expires_at"` // RFC 3339
+}
+
 type secretResponse struct {
-	Secret map[string]string `json:"secret"`
+	Secret  map[string]string `json:"secret"`
+	Session *sessionGrant     `json:"session,omitempty"`
 }
 
 type errorResponse struct {
@@ -182,6 +193,17 @@ func (p *httpProxyClient) Request(ctx context.Context, secretName, vault, reason
 		Reason:     reason,
 	}
 
+	// The daemon is what holds an approval window, so only ask for one when
+	// there is a daemon, and present the window it holds for this gate.
+	if p.dc != nil {
+		payload.Session = true
+		if p.dc.IsRunning() {
+			if token, err := p.dc.Session(p.serverURL); err == nil {
+				payload.SessionToken = token
+			}
+		}
+	}
+
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling request: %w", err)
@@ -212,31 +234,22 @@ func (p *httpProxyClient) Request(ctx context.Context, secretName, vault, reason
 		return nil, fmt.Errorf("parsing request response: %w", err)
 	}
 
-	// Step 2: Poll for approval with context and deadline
+	// The gate no longer honours the window that was presented: forget it.
+	if reqResp.SessionInvalid && p.dc != nil {
+		_ = p.dc.ClearSession(p.serverURL)
+	}
+
+	// Step 2: Poll for approval with context and deadline. The first look is
+	// immediate: a request released under an approval window is already
+	// approved.
 	ticker := time.NewTicker(defaultPollInterval)
 	defer ticker.Stop()
 	deadline := time.After(defaultPollTimeout)
 
 	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-deadline:
-			return &RequestResult{
-				Status:     "timeout",
-				SecretName: secretName,
-				Cached:     false,
-				Message:    "Timed out waiting for approval.",
-			}, nil
-		case <-ticker.C:
-			status, err := p.checkStatus(reqResp.StatusURL)
-			if err != nil {
-				continue
-			}
-
+		if status, err := p.checkStatus(reqResp.StatusURL); err == nil {
 			switch status.Status {
 			case "pending":
-				continue
 			case "approved":
 				// Step 3: Retrieve secret and cache it
 				return p.retrieveAndCache(status.SecretURL, secretName, vault)
@@ -257,6 +270,19 @@ func (p *httpProxyClient) Request(ctx context.Context, secretName, vault, reason
 			default:
 				return nil, fmt.Errorf("unknown status: %s", status.Status)
 			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline:
+			return &RequestResult{
+				Status:     "timeout",
+				SecretName: secretName,
+				Cached:     false,
+				Message:    "Timed out waiting for approval.",
+			}, nil
+		case <-ticker.C:
 		}
 	}
 }
@@ -332,10 +358,30 @@ func (p *httpProxyClient) retrieveAndCache(secretURL, secretName, vault string) 
 	if p.dc != nil {
 		if err := p.dc.EnsureRunning(); err != nil {
 			result.Message = "Warning: secret approved but daemon failed to start: " + err.Error()
-		} else if err := p.dc.Store(secretName, vault, secretResp.Secret, p.cacheTTLSec); err != nil {
-			result.Message = "Warning: secret approved but caching failed: " + err.Error()
+		} else {
+			if err := p.dc.Store(secretName, vault, secretResp.Secret, p.cacheTTLSec); err != nil {
+				result.Message = "Warning: secret approved but caching failed: " + err.Error()
+			}
+			if secretResp.Session != nil {
+				result.Message += " " + p.keepWindow(*secretResp.Session)
+			}
 		}
 	}
 
 	return result, nil
+}
+
+// keepWindow hands the approval window the gate just opened to the daemon and
+// returns what to tell the caller about it. The token itself is never part of
+// that.
+func (p *httpProxyClient) keepWindow(grant sessionGrant) string {
+	expiresAt, err := time.Parse(time.RFC3339, grant.ExpiresAt)
+	if err != nil {
+		return "Warning: the approver opened an approval window but its expiry could not be read, so it was not kept."
+	}
+	if err := p.dc.SetSession(p.serverURL, grant.Token, expiresAt); err != nil {
+		return "Warning: the approver opened an approval window but it could not be kept: " + err.Error()
+	}
+	return "The approver opened an approval window until " + expiresAt.Local().Format("15:04 MST") +
+		": further requests from this machine are released without a new approval, and each one is reported to the approver."
 }

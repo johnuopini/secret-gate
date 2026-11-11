@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- Mock implementations ---
@@ -16,15 +17,37 @@ type mockDaemonClient struct {
 	statusInfo *DaemonStatusResult
 	statusErr  error
 	cache      map[string]map[string]string // key = "name:vault"
+	windows    map[string]mockWindow        // key = gate server URL
 	storeErr   error
 	ensureErr  error
+}
+
+// mockWindow is an approval window the mock daemon holds for one gate server.
+type mockWindow struct {
+	token     string
+	expiresAt time.Time
 }
 
 func newMockDaemonClient(running bool) *mockDaemonClient {
 	return &mockDaemonClient{
 		running: running,
 		cache:   make(map[string]map[string]string),
+		windows: make(map[string]mockWindow),
 	}
+}
+
+func (m *mockDaemonClient) Session(server string) (string, error) {
+	return m.windows[server].token, nil
+}
+
+func (m *mockDaemonClient) SetSession(server, token string, expiresAt time.Time) error {
+	m.windows[server] = mockWindow{token: token, expiresAt: expiresAt}
+	return nil
+}
+
+func (m *mockDaemonClient) ClearSession(server string) error {
+	delete(m.windows, server)
+	return nil
 }
 
 func (m *mockDaemonClient) cacheKey(name, vault string) string {

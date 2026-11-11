@@ -77,6 +77,15 @@ func (g *Gate) Tap(data string) string {
 	return g.Notifier.lastAnswer()
 }
 
+// TapEveryPrompt makes the approver press button ("approve", "deny" or
+// "session") on every approval prompt the moment it is shown, for clients that
+// block until they have their answer.
+func (g *Gate) TapEveryPrompt(button string) {
+	g.Notifier.mu.Lock()
+	defer g.Notifier.mu.Unlock()
+	g.Notifier.onPrompt = func(requestID string) { g.Tap(button + ":" + requestID) }
+}
+
 // Notifier stands in for the Telegram chat and records what was sent to it.
 type Notifier struct {
 	mu           sync.Mutex
@@ -87,6 +96,7 @@ type Notifier struct {
 	ended        []string
 	answers      []string
 	failReleases bool
+	onPrompt     func(requestID string)
 }
 
 // FailReleases makes every later release notice fail to send.
@@ -143,9 +153,16 @@ func (n *Notifier) lastAnswer() string {
 // SendApprovalRequest implements handlers.Notifier.
 func (n *Notifier) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL string) (int, error) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	n.prompts = append(n.prompts, *req)
-	return len(n.prompts), nil
+	messageID := len(n.prompts)
+	onPrompt := n.onPrompt
+	n.mu.Unlock()
+
+	// The tap records its own answer, so it runs with the lock released.
+	if onPrompt != nil {
+		onPrompt(req.ID)
+	}
+	return messageID, nil
 }
 
 // SendSessionRelease implements handlers.Notifier.
