@@ -77,7 +77,7 @@ curl -sL https://raw.githubusercontent.com/johnuopini/secret-gate/main/install.s
 
 - **1Password Connect server** — a running instance that Secret Gate queries for secrets ([setup guide](https://developer.1password.com/docs/connect/get-started/))
 - **Telegram bot** — created via [@BotFather](https://t.me/BotFather) to send approval notifications
-- **Docker** (recommended) or Go 1.23+ for building from source
+- **Docker** (recommended) or Go 1.26+ for building from source
 
 ## Server Deployment
 
@@ -272,10 +272,10 @@ For detailed request/response schemas, see the OpenAPI spec at `/openapi.json` o
 
 ## Security
 
-- **No secrets on disk.** Secrets are cached only in the daemon's in-process memory. Nothing is written to the filesystem.
+- **No secrets on disk.** Secrets are cached only in the daemon's in-process memory. The one exception is SSH keys, which pass through a short-lived owner-only temp file (see below).
 - **No secrets in agent context.** MCP tools execute commands with secrets injected as env vars — the agent never sees the actual values.
 - **Unix socket IPC.** The daemon listens on a Unix socket with `0600` permissions, accessible only to the owning user.
-- **SSH agent integration.** SSH keys are added to ssh-agent with a TTL that matches the cache expiry, so they are automatically removed.
+- **SSH agent integration.** SSH keys are added to ssh-agent with a TTL that matches the cache expiry, so they are automatically removed. If the agent is unavailable or disabled, `ssh_with_secret` gives the key to `ssh -i` through a temp file that is deleted when the command ends.
 - **Telegram approval gate.** Every secret access requires explicit human approval through Telegram inline buttons.
 - **One-time tokens.** Secret retrieval tokens can only be used once. A second fetch returns an error.
 - **Configurable TTL.** All approval requests expire after a configurable duration (default: 15 minutes).

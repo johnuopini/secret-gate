@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -83,9 +84,12 @@ func (c *Client) GetVaults() ([]Vault, error) {
 
 // GetItemByTitle fetches an item by vault ID and item title
 func (c *Client) GetItemByTitle(vaultID, itemTitle string) (*Item, error) {
-	url := fmt.Sprintf("%s/v1/vaults/%s/items?filter=title eq \"%s\"", c.baseURL, vaultID, itemTitle)
+	// The filter holds spaces and quotes; sent raw they break the request line
+	// and Connect answers 400 before the filter is ever read.
+	filter := url.QueryEscape(fmt.Sprintf("title eq \"%s\"", itemTitle))
+	endpoint := fmt.Sprintf("%s/v1/vaults/%s/items?filter=%s", c.baseURL, vaultID, filter)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}

@@ -3,9 +3,11 @@ package telegram
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -170,7 +172,7 @@ func (c *Client) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL
 
 	resp, err := c.httpClient.Post(c.baseURL+"/sendMessage", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return 0, fmt.Errorf("sending message: %w", err)
+		return 0, fmt.Errorf("sending message: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -248,7 +250,7 @@ func (c *Client) AnswerCallbackQuery(callbackID, text string) error {
 
 	resp, err := c.httpClient.Post(c.baseURL+"/answerCallbackQuery", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("sending request: %w", err)
+		return fmt.Errorf("sending request: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -257,12 +259,12 @@ func (c *Client) AnswerCallbackQuery(callbackID, text string) error {
 
 // GetUpdates fetches new updates from Telegram using long polling
 func (c *Client) GetUpdates(timeout int) ([]Update, error) {
-	url := fmt.Sprintf("%s/getUpdates?offset=%d&timeout=%d&allowed_updates=[\"callback_query\"]",
+	endpoint := fmt.Sprintf("%s/getUpdates?offset=%d&timeout=%d&allowed_updates=[\"callback_query\"]",
 		c.baseURL, c.lastUpdateID+1, timeout)
 
-	resp, err := c.httpClient.Get(url)
+	resp, err := c.httpClient.Get(endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("fetching updates: %w", err)
+		return nil, fmt.Errorf("fetching updates: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -299,7 +301,7 @@ func (c *Client) GetUpdates(timeout int) ([]Update, error) {
 func (c *Client) DeleteWebhook() error {
 	resp, err := c.httpClient.Post(c.baseURL+"/deleteWebhook", "application/json", nil)
 	if err != nil {
-		return fmt.Errorf("deleting webhook: %w", err)
+		return fmt.Errorf("deleting webhook: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -380,7 +382,7 @@ func (c *Client) editMessage(messageID int, text string, keyboard *InlineKeyboar
 
 	resp, err := c.httpClient.Post(c.baseURL+"/editMessageText", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("sending request: %w", err)
+		return fmt.Errorf("sending request: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -399,6 +401,16 @@ func (c *Client) editMessage(messageID int, text string, keyboard *InlineKeyboar
 	}
 
 	return nil
+}
+
+// withoutURL drops the request URL from an HTTP client error. The URL carries
+// the bot token, and these errors end up in the server log.
+func withoutURL(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("%s: %w", urlErr.Op, urlErr.Err)
+	}
+	return err
 }
 
 func escapeMarkdown(s string) string {

@@ -393,15 +393,26 @@ func handleSSHWithSecret(ctx context.Context, dc FullDaemonClient, cfg Config, i
 		return toolError(fmt.Sprintf("no SSH private key found in secret %q. Available fields: %s", input.SecretName, strings.Join(availableFields, ", "))), SSHWithSecretOutput{}, nil
 	}
 
-	// Add key to ssh-agent
+	// Add key to ssh-agent; without an agent, hand ssh a short-lived key file instead
+	agentHasKey := false
 	if cfg.SSHAgent {
 		ttl := time.Duration(cfg.CacheTTLSec) * time.Second
 		if ttl <= 0 {
 			ttl = defaultSSHAgentTTL
 		}
-		if err := daemon.AddToSSHAgent(keyValue, ttl); err != nil {
-			return toolError(fmt.Sprintf("failed to add SSH key (%s) to ssh-agent: %v", fieldName, err)), SSHWithSecretOutput{}, nil
+		agentHasKey = daemon.AddToSSHAgent(keyValue, ttl) == nil
+	}
+
+	keyFilePath := ""
+	if !agentHasKey {
+		path, err := writeTempKeyFile(keyValue)
+		if path != "" {
+			defer os.Remove(path)
 		}
+		if err != nil {
+			return toolError(fmt.Sprintf("failed to write temporary key file for SSH key (%s): %v", fieldName, err)), SSHWithSecretOutput{}, nil
+		}
+		keyFilePath = path
 	}
 
 	// Build SSH command
@@ -410,6 +421,9 @@ func handleSSHWithSecret(ctx context.Context, dc FullDaemonClient, cfg Config, i
 		port = defaultSSHPort
 	}
 	sshArgs := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-p", fmt.Sprintf("%d", port)}
+	if keyFilePath != "" {
+		sshArgs = append(sshArgs, "-i", keyFilePath)
+	}
 	sshArgs = append(sshArgs, input.Host)
 	if input.Command != "" {
 		sshArgs = append(sshArgs, input.Command)
@@ -440,6 +454,24 @@ func handleSSHWithSecret(ctx context.Context, dc FullDaemonClient, cfg Config, i
 }
 
 // --- Helper functions ---
+
+// writeTempKeyFile writes an SSH private key to a new owner-only temp file and
+// returns its path. The caller removes the file; the path is returned even on a
+// write error so a partial file can be removed too.
+func writeTempKeyFile(keyValue string) (string, error) {
+	f, err := os.CreateTemp("", "sg-ssh-key-*") // created with mode 0600
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasSuffix(keyValue, "\n") {
+		keyValue += "\n"
+	}
+	if _, err := f.WriteString(keyValue); err != nil {
+		f.Close()
+		return f.Name(), err
+	}
+	return f.Name(), f.Close()
+}
 
 // toolError creates a tool error result (not a protocol error).
 func toolError(msg string) *mcp.CallToolResult {
