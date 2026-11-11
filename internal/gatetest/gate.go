@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -69,11 +70,18 @@ func Start(t *testing.T, items []Item, options ...func(*config.Config)) *Gate {
 // Tap presses a button the way the approver would, given the button's callback
 // data, and returns the answer Telegram would show them.
 func (g *Gate) Tap(data string) string {
-	g.handler.HandleCallback(&telegram.CallbackQuery{
+	callback := &telegram.CallbackQuery{
 		ID:   "callback-1",
 		From: telegram.User{Username: Approver},
 		Data: data,
-	})
+	}
+	// Telegram sends the message a button sits on along with the tap.
+	if _, requestID, ok := strings.Cut(data, ":"); ok {
+		if messageID := g.Notifier.promptMessage(requestID); messageID != 0 {
+			callback.Message = &telegram.Message{MessageID: messageID}
+		}
+	}
+	g.handler.HandleCallback(callback)
 	return g.Notifier.lastAnswer()
 }
 
@@ -96,7 +104,9 @@ type Notifier struct {
 	ended        []string
 	answers      []string
 	failReleases bool
+	failEdits    bool
 	onPrompt     func(requestID string)
+	onRelease    func()
 }
 
 // FailReleases makes every later release notice fail to send.
@@ -104,6 +114,22 @@ func (n *Notifier) FailReleases() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.failReleases = true
+}
+
+// FailEdits makes every later rewrite of a message fail, as when Telegram
+// refuses the edit.
+func (n *Notifier) FailEdits() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.failEdits = true
+}
+
+// WhileReleaseIsSent runs do while the next release notices are on their way
+// to the approver, before the gate hears they arrived.
+func (n *Notifier) WhileReleaseIsSent(do func()) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.onRelease = do
 }
 
 // Releases returns the requests reported as released under an approval window.
@@ -141,6 +167,19 @@ func (n *Notifier) Denied() []models.ApprovalRequest {
 	return append([]models.ApprovalRequest(nil), n.denied...)
 }
 
+// promptMessage returns the ID of the message that asked about a request, or
+// zero when there is none.
+func (n *Notifier) promptMessage(requestID string) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for i, prompt := range n.prompts {
+		if prompt.ID == requestID {
+			return i + 1
+		}
+	}
+	return 0
+}
+
 func (n *Notifier) lastAnswer() string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -168,12 +207,20 @@ func (n *Notifier) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseU
 // SendSessionRelease implements handlers.Notifier.
 func (n *Notifier) SendSessionRelease(req *models.ApprovalRequest) (int, error) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	if n.failReleases {
+		n.mu.Unlock()
 		return 0, errors.New("telegram is unreachable")
 	}
 	n.releases = append(n.releases, *req)
-	return len(n.releases), nil
+	messageID := len(n.releases)
+	onRelease := n.onRelease
+	n.mu.Unlock()
+
+	// A tap records its own answer, so it runs with the lock released.
+	if onRelease != nil {
+		onRelease()
+	}
+	return messageID, nil
 }
 
 // SendSessionEnded implements handlers.Notifier.
@@ -188,6 +235,9 @@ func (n *Notifier) SendSessionEnded(machine, endedBy string) error {
 func (n *Notifier) UpdateMessageApproved(messageID int, req *models.ApprovalRequest, approver string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.failEdits {
+		return errors.New("telegram refused the edit")
+	}
 	n.approved = append(n.approved, *req)
 	return nil
 }

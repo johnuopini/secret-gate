@@ -112,6 +112,27 @@ func TestEnd_UnknownIDEndsNothing(t *testing.T) {
 	}
 }
 
+func TestDiscard_ClosesOnlyThatSession(t *testing.T) {
+	s := NewStore()
+	kept, _, err := s.Create("devvm", time.Hour)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	dropped, session, err := s.Create("devvm", time.Hour)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	s.Discard(session.ID)
+
+	if _, ok := s.Lookup(dropped); ok {
+		t.Error("the discarded session is still open")
+	}
+	if _, ok := s.Lookup(kept); !ok {
+		t.Error("Discard closed another session of the same machine")
+	}
+}
+
 func TestCleanup_RemovesOnlyExpiredSessions(t *testing.T) {
 	s := NewStore()
 	s.Create("devvm", time.Millisecond)

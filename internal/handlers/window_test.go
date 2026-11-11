@@ -129,6 +129,25 @@ func TestWindowTap_BatchRequest_AlsoHandsOutTheToken(t *testing.T) {
 	}
 }
 
+func TestWindowTap_WhenTheApproverCannotBeShownTheEndButton_ApprovesOnlyThatRequest(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	_, reply := askFromWindowClient(t, gate, "devvm", "llm-proxy", "")
+	gate.Notifier.FailEdits()
+
+	answer := gate.Tap("session:" + onlyPromptID(t, gate))
+
+	if answer != "Approved this request only. No window: this message could not be updated." {
+		t.Errorf("answer = %q, want one saying no window was opened", answer)
+	}
+	code, secret := retrieve(t, gate, reply.Token)
+	if code != http.StatusOK || secret.Secret["password"] != "s3cret" {
+		t.Fatalf("GET /secret = %d with password %q, want 200 with the item's password", code, secret.Secret["password"])
+	}
+	if secret.Session != nil {
+		t.Error("a window was opened that the approver has no button to end")
+	}
+}
+
 func TestApproveTap_OnARequestThatOffersAWindow_OpensNone(t *testing.T) {
 	gate := gatetest.Start(t, vault)
 	_, reply := askFromWindowClient(t, gate, "devvm", "llm-proxy", "")
@@ -277,6 +296,28 @@ func TestRequest_UnderAWindow_WhenTheApproverCannotBeTold_IsRefused(t *testing.T
 	}
 	if reply.Token != "" {
 		t.Error("gate handed out a request token for a release it could not report")
+	}
+}
+
+func TestRequest_UnderAWindowEndedWhileTheApproverIsTold_AsksInstead(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	windowToken := openWindow(t, gate)
+	windowID := gate.Notifier.Approved()[0].SessionID
+	gate.Notifier.WhileReleaseIsSent(func() { gate.Tap("endsession:" + windowID) })
+
+	code, reply := askFromWindowClient(t, gate, "devvm", "db", windowToken)
+
+	if code != http.StatusAccepted {
+		t.Fatalf("POST /request = %d, want %d", code, http.StatusAccepted)
+	}
+	if !reply.SessionInvalid {
+		t.Error("gate did not tell the client its window was ended")
+	}
+	if got := statusOf(t, gate, reply.Token); got != "pending" {
+		t.Errorf("status = %q, want pending", got)
+	}
+	if n := len(gate.Notifier.Prompts()); n != 2 {
+		t.Errorf("approver was asked %d times, want again for the request the ended window no longer covers", n)
 	}
 }
 
