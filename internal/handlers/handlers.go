@@ -442,7 +442,11 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 
 	// Batch mode: multiple secrets requested or field filtering specified
 	if len(req.Secrets) > 1 || (len(req.Secrets) == 1 && len(req.Secrets[0].Fields) > 0) {
+		// The reply is keyed by item title. Two names that find the same
+		// item share one entry holding the fields of both; two items of one
+		// title from different vaults cannot both be handed back.
 		result := make(map[string]map[string]string)
+		foundIn := make(map[string]string)
 
 		for _, s := range req.Secrets {
 			vault := s.Vault
@@ -451,11 +455,11 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 			}
 
 			var allFields map[string]string
-			var actualName string
+			var actualName, actualVault string
 
 			if vault == "_auto_" {
 				var err error
-				allFields, _, actualName, err = h.findAcrossVaults(req, s.SecretName)
+				allFields, actualVault, actualName, err = h.findAcrossVaults(req, s.SecretName)
 				if err != nil {
 					h.log.Error("Failed to find secret", logger.F("error", err.Error(), "secret", s.SecretName))
 					h.fetchFailed(w, req, fmt.Sprintf("Failed to retrieve %s: %s", s.SecretName, err.Error()))
@@ -469,28 +473,31 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 					h.fetchFailed(w, req, fmt.Sprintf("Failed to retrieve %s: %s", s.SecretName, err.Error()))
 					return
 				}
-				actualName = s.SecretName
+				actualName, actualVault = s.SecretName, vault
 			}
 
-			// Two names that differ can still find the same item, and
-			// the reply would then keep only one of them.
-			if _, taken := result[actualName]; taken {
-				h.log.Error("Two requested names found the same item", logger.F("request_id", req.ID, "secret", s.SecretName, "item", actualName))
-				h.fetchFailed(w, req, fmt.Sprintf("Failed to retrieve %s: it finds %q, which this request already holds. Ask for %q once, with all the fields you need.", s.SecretName, actualName, actualName))
+			if held, taken := foundIn[actualName]; taken && held != actualVault {
+				h.log.Error("Two requested names found items of one title in different vaults", logger.F("request_id", req.ID, "secret", s.SecretName, "item", actualName, "vault", actualVault, "held_vault", held))
+				h.fetchFailed(w, req, fmt.Sprintf("Failed to retrieve %s: it finds %q in vault %q, and this request already holds the item of that title from vault %q. The reply is keyed by title, so send one request per vault.", s.SecretName, actualName, actualVault, held))
 				return
 			}
+			foundIn[actualName] = actualVault
 
-			// Filter fields if specified
-			if len(s.Fields) > 0 {
-				filtered := make(map[string]string)
-				for _, f := range s.Fields {
-					if val, ok := allFields[f]; ok {
-						filtered[f] = val
-					}
+			entry := result[actualName]
+			if entry == nil {
+				entry = make(map[string]string)
+				result[actualName] = entry
+			}
+			if len(s.Fields) == 0 {
+				for f, val := range allFields {
+					entry[f] = val
 				}
-				result[actualName] = filtered
-			} else {
-				result[actualName] = allFields
+				continue
+			}
+			for _, f := range s.Fields {
+				if val, ok := allFields[f]; ok {
+					entry[f] = val
+				}
 			}
 		}
 

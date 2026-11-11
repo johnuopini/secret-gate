@@ -171,7 +171,7 @@ func TestRequest_NamingTheSameSecretTwice_IsRefused(t *testing.T) {
 	}
 }
 
-func TestApprove_BatchWhoseNamesFindTheSameItem_ReleasesNothing(t *testing.T) {
+func TestApprove_BatchWhoseNamesFindTheSameItem_ReleasesItOnceWithEveryField(t *testing.T) {
 	gate := gatetest.Start(t, vault)
 	_, reply := ask(t, gate, handlers.BatchRequestPayload{
 		Secrets: []models.SecretRequest{
@@ -185,11 +185,38 @@ func TestApprove_BatchWhoseNamesFindTheSameItem_ReleasesNothing(t *testing.T) {
 
 	code, secret := retrieve(t, gate, reply.Token)
 
+	if code != http.StatusOK {
+		t.Fatalf("GET /secret = %d %q %q, want 200", code, secret.Error, secret.Message)
+	}
+	got := secret.Secrets["llm-proxy"]
+	if len(secret.Secrets) != 1 || got["username"] != "deploy" || got["password"] != "s3cret" {
+		t.Errorf("secrets = %v, want llm-proxy with both the username and the password", secret.Secrets)
+	}
+}
+
+func TestApprove_BatchWhoseNamesFindTwoItemsOfOneTitle_ReleasesNothing(t *testing.T) {
+	gate := gatetest.Start(t, []gatetest.Item{
+		{Title: "db", Fields: map[string]string{"password": "db-pass"}},
+		{Title: "db", Fields: map[string]string{"password": "other-pass"}, Vault: "Other"},
+	})
+	_, reply := ask(t, gate, handlers.BatchRequestPayload{
+		Secrets: []models.SecretRequest{
+			{SecretName: "db", Vault: "Other"},
+			// Found in HomeLab, which is searched first.
+			{SecretName: "DB"},
+		},
+		Machine: "devvm",
+		Reason:  "test",
+	})
+	gate.Tap("approve:" + onlyPromptID(t, gate))
+
+	code, secret := retrieve(t, gate, reply.Token)
+
 	if code != http.StatusInternalServerError || secret.Error != "secret_fetch_failed" {
 		t.Fatalf("GET /secret = %d %q with %v, want 500 secret_fetch_failed", code, secret.Error, secret.Secrets)
 	}
-	if !strings.Contains(secret.Message, `"llm-proxy"`) {
-		t.Errorf("message = %q, want it to name the item found twice", secret.Message)
+	if !strings.Contains(secret.Message, `"Other"`) || !strings.Contains(secret.Message, `"HomeLab"`) {
+		t.Errorf("message = %q, want it to name both vaults", secret.Message)
 	}
 }
 
