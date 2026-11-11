@@ -14,7 +14,7 @@ jobs:
         with:
           go-version: "1.27"
       - name: gofmt
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+        run: out=$(gofmt -l .); [ -z "$out" ] || { echo "$out"; exit 1; }
       - run: go test ./... -count=1 -v
       - run: go vet ./...
 
