@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -82,43 +81,35 @@ func (c *Client) GetVaults() ([]Vault, error) {
 	return vaults, nil
 }
 
-// GetItemByTitle fetches an item by vault ID and item title
+// GetItemByTitle fetches the one item in a vault whose title is exactly
+// itemTitle.
+//
+// The title is matched here, against the vault's item list, and not through
+// Connect's filter parameter. Connect reads a filter as an expression: a title
+// holding a double quote can close the value and add its own "or" term, which
+// would release an item other than the one the approver was shown.
 func (c *Client) GetItemByTitle(vaultID, itemTitle string) (*Item, error) {
-	// The filter holds spaces and quotes; sent raw they break the request line
-	// and Connect answers 400 before the filter is ever read.
-	filter := url.QueryEscape(fmt.Sprintf("title eq \"%s\"", itemTitle))
-	endpoint := fmt.Sprintf("%s/v1/vaults/%s/items?filter=%s", c.baseURL, vaultID, filter)
-
-	req, err := http.NewRequest("GET", endpoint, nil)
+	items, err := c.ListItemsInVault(vaultID)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("executing request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
+	var matches []Item
+	for _, item := range items {
+		if item.Title == itemTitle {
+			matches = append(matches, item)
+		}
 	}
 
-	var items []Item
-	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
-		return nil, fmt.Errorf("decoding response: %w", err)
-	}
-
-	if len(items) == 0 {
+	switch len(matches) {
+	case 0:
 		return nil, fmt.Errorf("item not found: %s", itemTitle)
+	case 1:
+		// Get the full item with all fields
+		return c.GetItem(vaultID, matches[0].ID)
+	default:
+		return nil, fmt.Errorf("%d items in this vault are titled %q, so the title does not say which one to fetch", len(matches), itemTitle)
 	}
-
-	// Get the full item with all fields
-	return c.GetItem(vaultID, items[0].ID)
 }
 
 // GetItem fetches a full item by vault ID and item ID
