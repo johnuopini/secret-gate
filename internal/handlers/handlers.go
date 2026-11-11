@@ -164,6 +164,14 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The client polls the status URL built from this, so without it no one
+	// is asked about a request the client could never follow.
+	baseURL := h.config.WebhookBaseURL
+	if baseURL == "" {
+		h.writeError(w, http.StatusInternalServerError, "config_error", "WEBHOOK_BASE_URL not configured")
+		return
+	}
+
 	var payload BatchRequestPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid_json", "Invalid JSON payload")
@@ -267,13 +275,6 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 		"requester_ip", req.RequesterIP,
 	))
 
-	// Build response
-	baseURL := h.config.WebhookBaseURL
-	if baseURL == "" {
-		h.writeError(w, http.StatusInternalServerError, "config_error", "WEBHOOK_BASE_URL not configured")
-		return
-	}
-
 	resp := RequestResponse{
 		Token:          req.Token,
 		StatusURL:      baseURL + "/status/" + req.Token,
@@ -294,12 +295,6 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 // any other; the notice already sent carries the same request ID as that
 // prompt.
 func (h *Handler) releaseUnderSession(w http.ResponseWriter, req *models.ApprovalRequest, token string, sess session.Session) bool {
-	baseURL := h.config.WebhookBaseURL
-	if baseURL == "" {
-		h.writeError(w, http.StatusInternalServerError, "config_error", "WEBHOOK_BASE_URL not configured")
-		return true
-	}
-
 	req.SessionID = sess.ID
 	req.SessionExpiresAt = sess.ExpiresAt
 
@@ -337,7 +332,7 @@ func (h *Handler) releaseUnderSession(w http.ResponseWriter, req *models.Approva
 
 	h.writeJSON(w, http.StatusAccepted, RequestResponse{
 		Token:     req.Token,
-		StatusURL: baseURL + "/status/" + req.Token,
+		StatusURL: h.config.WebhookBaseURL + "/status/" + req.Token,
 		ExpiresAt: req.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"),
 		Message:   "Request released under an open approval window. Poll the status_url to retrieve the secret.",
 	})

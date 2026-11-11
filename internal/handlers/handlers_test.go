@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/johnuopini/secret-gate/internal/config"
 	"github.com/johnuopini/secret-gate/internal/gatetest"
 	"github.com/johnuopini/secret-gate/internal/handlers"
 	"github.com/johnuopini/secret-gate/internal/models"
@@ -145,6 +146,24 @@ func TestRequest_WhenTheApproverCannotBeAsked_IsRefused(t *testing.T) {
 	}
 	if reply.Token != "" {
 		t.Error("gate handed out a request token that no one was asked to approve")
+	}
+}
+
+func TestRequest_WithoutAWebhookBaseURL_AsksNoOne(t *testing.T) {
+	gate := gatetest.Start(t, vault, func(cfg *config.Config) { cfg.WebhookBaseURL = "" })
+
+	code, reply := ask(t, gate, handlers.BatchRequestPayload{
+		SecretName: "llm-proxy",
+		Vault:      gatetest.Vault,
+		Machine:    "devvm",
+		Reason:     "test",
+	})
+
+	if code != http.StatusInternalServerError || !strings.Contains(reply.Message, "WEBHOOK_BASE_URL") {
+		t.Errorf("POST /request = %d %q, want 500 naming WEBHOOK_BASE_URL", code, reply.Message)
+	}
+	if n := len(gate.Notifier.Prompts()); n != 0 {
+		t.Errorf("approver was asked %d times about a request the client has no token for, want 0", n)
 	}
 }
 
