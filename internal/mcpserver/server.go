@@ -39,7 +39,9 @@ type FullDaemonClient interface {
 	// server, or "" when none is held.
 	Session(server string) (string, error)
 	SetSession(server, token string, expiresAt time.Time) error
-	ClearSession(server string) error
+	// ClearSession forgets the window held for a gate server if it is still
+	// the one with this token.
+	ClearSession(server, token string) error
 }
 
 // ProxyClient provides HTTP proxy access to the secret-gate server.
@@ -574,8 +576,8 @@ func (r *realDaemonClient) SetSession(server, token string, expiresAt time.Time)
 	return r.client.SetSession(server, token, expiresAt)
 }
 
-func (r *realDaemonClient) ClearSession(server string) error {
-	return r.client.ClearSession(server)
+func (r *realDaemonClient) ClearSession(server, token string) error {
+	return r.client.ClearSession(server, token)
 }
 
 func (r *realDaemonClient) EnsureRunning() error {

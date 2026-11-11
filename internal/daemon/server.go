@@ -188,10 +188,10 @@ func (s *Server) handleSessionSet(req Request) Response {
 }
 
 func (s *Server) handleSessionClear(req Request) Response {
-	if req.Session == nil || req.Session.Server == "" {
-		return Response{Error: "session server is required"}
+	if req.Session == nil || req.Session.Server == "" || req.Session.Token == "" {
+		return Response{Error: "session server and token are required"}
 	}
-	s.sessions.clear(req.Session.Server)
+	s.sessions.clear(req.Session.Server, req.Session.Token)
 	return Response{OK: true}
 }
 

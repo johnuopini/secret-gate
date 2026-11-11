@@ -268,7 +268,7 @@ func main() {
 
 	// The gate no longer honours the window that was presented: forget it.
 	if reqResp.SessionInvalid && daemonClient != nil {
-		_ = daemonClient.ClearSession(*server)
+		_ = daemonClient.ClearSession(*server, payload.SessionToken)
 	}
 
 	fmt.Fprintf(os.Stderr, "Request submitted. Waiting for approval...\n")

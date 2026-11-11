@@ -45,8 +45,10 @@ func (m *mockDaemonClient) SetSession(server, token string, expiresAt time.Time)
 	return nil
 }
 
-func (m *mockDaemonClient) ClearSession(server string) error {
-	delete(m.windows, server)
+func (m *mockDaemonClient) ClearSession(server, token string) error {
+	if m.windows[server].token == token {
+		delete(m.windows, server)
+	}
 	return nil
 }
 

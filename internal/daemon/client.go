@@ -153,9 +153,11 @@ func (c *Client) SetSession(server, token string, expiresAt time.Time) error {
 	return nil
 }
 
-// ClearSession makes the daemon forget the approval window of a gate server.
-func (c *Client) ClearSession(server string) error {
-	resp, err := c.send(Request{Command: CmdSessionClear, Session: &SessionInfo{Server: server}})
+// ClearSession makes the daemon forget the approval window of a gate server,
+// provided it still holds the one with this token. A window another process
+// stored since is kept.
+func (c *Client) ClearSession(server, token string) error {
+	resp, err := c.send(Request{Command: CmdSessionClear, Session: &SessionInfo{Server: server, Token: token}})
 	if err != nil {
 		return err
 	}

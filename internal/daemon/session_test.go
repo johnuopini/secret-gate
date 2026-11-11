@@ -115,7 +115,7 @@ func TestClearSession_ForgetsOnlyThatGatesWindow(t *testing.T) {
 	client.SetSession(gateA, "token-a", time.Now().Add(time.Hour))
 	client.SetSession(gateB, "token-b", time.Now().Add(time.Hour))
 
-	if err := client.ClearSession(gateA); err != nil {
+	if err := client.ClearSession(gateA, "token-a"); err != nil {
 		t.Fatalf("ClearSession: %v", err)
 	}
 
@@ -124,6 +124,21 @@ func TestClearSession_ForgetsOnlyThatGatesWindow(t *testing.T) {
 	}
 	if window, _ := client.Session(gateB); window == nil || window.Token != "token-b" {
 		t.Errorf("gate B's window = %+v, want it kept", window)
+	}
+}
+
+// Two client processes share the daemon: one learns its window is no good
+// after the other has already stored the window that replaced it.
+func TestClearSession_OfAWindowAlreadyReplaced_KeepsTheNewOne(t *testing.T) {
+	_, client := startDaemon(t)
+	client.SetSession(gateA, "token-new", time.Now().Add(time.Hour))
+
+	if err := client.ClearSession(gateA, "token-old"); err != nil {
+		t.Fatalf("ClearSession: %v", err)
+	}
+
+	if window, _ := client.Session(gateA); window == nil || window.Token != "token-new" {
+		t.Errorf("window = %+v, want the new one kept", window)
 	}
 }
 

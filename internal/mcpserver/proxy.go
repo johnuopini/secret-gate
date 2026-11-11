@@ -236,7 +236,7 @@ func (p *httpProxyClient) Request(ctx context.Context, secretName, vault, reason
 
 	// The gate no longer honours the window that was presented: forget it.
 	if reqResp.SessionInvalid && p.dc != nil {
-		_ = p.dc.ClearSession(p.serverURL)
+		_ = p.dc.ClearSession(p.serverURL, payload.SessionToken)
 	}
 
 	// Step 2: Poll for approval with context and deadline. The first look is

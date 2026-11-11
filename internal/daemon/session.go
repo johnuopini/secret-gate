@@ -47,10 +47,13 @@ func (s *sessionSet) get(server string) (SessionInfo, bool) {
 	return info, true
 }
 
-func (s *sessionSet) clear(server string) {
+// clear forgets the window held for server if it is the one with this token.
+func (s *sessionSet) clear(server, token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.byServer, server)
+	if s.byServer[server].Token == token {
+		delete(s.byServer, server)
+	}
 }
 
 func (s *sessionSet) flush() {
