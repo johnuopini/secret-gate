@@ -14,24 +14,47 @@ import (
 	"github.com/johnuopini/secret-gate/internal/telegram"
 )
 
+// Notifier is the approver's side of the gate: the chat where requests are
+// approved and where the gate reports what it did. *telegram.Client is the
+// real one.
+type Notifier interface {
+	SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL string) (int, error)
+	UpdateMessageApproved(messageID int, req *models.ApprovalRequest, approver string) error
+	UpdateMessageDenied(messageID int, req *models.ApprovalRequest, denier string) error
+	AnswerCallbackQuery(callbackID, text string) error
+}
+
 // Handler holds dependencies for HTTP handlers
 type Handler struct {
 	store    *store.Store
 	opClient *opconnect.Client
-	tgClient *telegram.Client
+	notifier Notifier
 	config   *config.Config
 	log      *logger.Logger
 }
 
 // New creates a new Handler
-func New(s *store.Store, op *opconnect.Client, tg *telegram.Client, cfg *config.Config) *Handler {
+func New(s *store.Store, op *opconnect.Client, notifier Notifier, cfg *config.Config) *Handler {
 	return &Handler{
 		store:    s,
 		opClient: op,
-		tgClient: tg,
+		notifier: notifier,
 		config:   cfg,
 		log:      logger.New(),
 	}
+}
+
+// Register adds the gate's routes to mux.
+func (h *Handler) Register(mux *http.ServeMux) {
+	mux.HandleFunc("/health", h.HandleHealth)
+	mux.HandleFunc("/_/health", h.HandleHealth) // OpenFaaS watchdog health check path
+	mux.HandleFunc("/request", h.HandleRequest)
+	mux.HandleFunc("/search", h.HandleSearch)
+	mux.HandleFunc("/fields", h.HandleFields)
+	mux.HandleFunc("/status/", h.HandleStatus)
+	mux.HandleFunc("/secret/", h.HandleSecret)
+	mux.HandleFunc("/client/", h.HandleClientDownload)
+	mux.HandleFunc("/openapi.json", h.HandleOpenAPI)
 }
 
 // SearchPayload is the JSON body for secret search
@@ -175,7 +198,7 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send Telegram notification
-	msgID, err := h.tgClient.SendApprovalRequest(req, h.config.WebhookBaseURL)
+	msgID, err := h.notifier.SendApprovalRequest(req, h.config.WebhookBaseURL)
 	if err != nil {
 		h.log.Error("Failed to send Telegram notification", logger.F("error", err.Error(), "request_id", req.ID))
 	} else {
@@ -369,6 +392,64 @@ func (h *Handler) HandleSecret(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("Secret retrieved", logger.F("request_id", req.ID, "secret", actualSecret, "vault", actualVault))
 	h.store.Delete(token)
 	h.writeJSON(w, http.StatusOK, SecretResponse{Secret: secret})
+}
+
+// HandleCallback acts on a button the approver pressed. The button's data is
+// "<action>:<request ID>".
+func (h *Handler) HandleCallback(callback *telegram.CallbackQuery) {
+	action, requestID, ok := strings.Cut(callback.Data, ":")
+	if !ok {
+		h.notifier.AnswerCallbackQuery(callback.ID, "Invalid callback data")
+		return
+	}
+
+	req, err := h.store.GetByID(requestID)
+	if err == store.ErrNotFound {
+		h.notifier.AnswerCallbackQuery(callback.ID, "Request not found or expired")
+		return
+	}
+	if err != nil {
+		h.log.Error("Error fetching request", logger.F("error", err.Error(), "request_id", requestID))
+		h.notifier.AnswerCallbackQuery(callback.ID, "Internal error")
+		return
+	}
+
+	if req.Status != models.StatusPending {
+		h.notifier.AnswerCallbackQuery(callback.ID, "Request already processed")
+		return
+	}
+
+	approver := callback.From.Username
+	if approver == "" {
+		approver = callback.From.FirstName
+	}
+
+	switch action {
+	case "approve":
+		req.Approve()
+		if err := h.store.Update(req); err != nil {
+			h.log.Error("Error updating request", logger.F("error", err.Error(), "request_id", req.ID))
+		}
+		h.notifier.AnswerCallbackQuery(callback.ID, "Approved!")
+		if req.TelegramMsgID != 0 {
+			h.notifier.UpdateMessageApproved(req.TelegramMsgID, req, approver)
+		}
+		h.log.Info("Request approved", logger.F("request_id", req.ID, "approver", approver))
+
+	case "deny":
+		req.Deny()
+		if err := h.store.Update(req); err != nil {
+			h.log.Error("Error updating request", logger.F("error", err.Error(), "request_id", req.ID))
+		}
+		h.notifier.AnswerCallbackQuery(callback.ID, "Denied")
+		if req.TelegramMsgID != 0 {
+			h.notifier.UpdateMessageDenied(req.TelegramMsgID, req, approver)
+		}
+		h.log.Info("Request denied", logger.F("request_id", req.ID, "approver", approver))
+
+	default:
+		h.notifier.AnswerCallbackQuery(callback.ID, "Unknown action")
+	}
 }
 
 // HandleHealth handles GET /health
