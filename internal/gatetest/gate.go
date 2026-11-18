@@ -79,7 +79,7 @@ func (g *Gate) Tap(data string) string {
 	}
 	// Telegram sends the message a button sits on along with the tap.
 	if _, requestID, ok := strings.Cut(data, ":"); ok {
-		if messageID := g.Notifier.promptMessage(requestID); messageID != 0 {
+		if messageID := g.Notifier.PromptMessage(requestID); messageID != 0 {
 			callback.Message = &telegram.Message{MessageID: messageID}
 		}
 	}
@@ -96,11 +96,25 @@ func (g *Gate) TapEveryPrompt(button string) {
 	g.Notifier.onPrompt = func(requestID string) { g.Tap(button + ":" + requestID) }
 }
 
+// WindowReport is one rewrite of an approval window's report, as the approver
+// was shown it.
+type WindowReport struct {
+	MessageID int  // message that shows the report
+	New       bool // sent as a new message rather than written over MessageID
+	Report    models.WindowReport
+}
+
+// firstReportMessage numbers the messages window reports move to, apart from
+// the prompts' message IDs.
+const firstReportMessage = 1000
+
 // Notifier stands in for the Telegram chat and records what was sent to it.
 type Notifier struct {
 	mu             sync.Mutex
 	prompts        []models.ApprovalRequest
-	releases       []models.ApprovalRequest
+	reports        []WindowReport
+	reportMessages int
+	deleted        map[int]bool
 	approved       []models.ApprovalRequest
 	denied         []models.ApprovalRequest
 	ended          []string
@@ -121,7 +135,8 @@ func (n *Notifier) FailPrompts() {
 	n.failPrompts = true
 }
 
-// FailReleases makes every later release notice fail to send.
+// FailReleases makes every later window report fail, both as an edit and as a
+// new message.
 func (n *Notifier) FailReleases() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -136,19 +151,55 @@ func (n *Notifier) FailEdits() {
 	n.failEdits = true
 }
 
-// WhileReleaseIsSent runs do while the next release notices are on their way
-// to the approver, before the gate hears they arrived.
+// DeleteMessage deletes a message from the chat, the way the approver can.
+// Later edits of it fail.
+func (n *Notifier) DeleteMessage(messageID int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.deleted == nil {
+		n.deleted = make(map[int]bool)
+	}
+	n.deleted[messageID] = true
+}
+
+// WhileReleaseIsSent runs do while the next reports of a release are on their
+// way to the approver, before the gate hears they arrived.
 func (n *Notifier) WhileReleaseIsSent(do func()) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.onRelease = do
 }
 
-// Releases returns the requests reported as released under an approval window.
+// WindowReports returns every window report the approver was shown, in order.
+func (n *Notifier) WindowReports() []WindowReport {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]WindowReport(nil), n.reports...)
+}
+
+// Releases returns the requests the approver is shown as released under
+// approval windows, oldest first: those the latest report of each window
+// lists.
 func (n *Notifier) Releases() []models.ApprovalRequest {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return append([]models.ApprovalRequest(nil), n.releases...)
+
+	var windows []string
+	latest := make(map[string]models.WindowReport)
+	for _, r := range n.reports {
+		if _, seen := latest[r.Report.SessionID]; !seen {
+			windows = append(windows, r.Report.SessionID)
+		}
+		latest[r.Report.SessionID] = r.Report
+	}
+	var releases []models.ApprovalRequest
+	for _, window := range windows {
+		recent := latest[window].Recent
+		for i := len(recent) - 1; i >= 0; i-- {
+			releases = append(releases, recent[i])
+		}
+	}
+	return releases
 }
 
 // Ended returns the machines whose approval windows were reported as ended.
@@ -195,9 +246,9 @@ func (n *Notifier) Denied() []models.ApprovalRequest {
 	return append([]models.ApprovalRequest(nil), n.denied...)
 }
 
-// promptMessage returns the ID of the message that asked about a request, or
+// PromptMessage returns the ID of the message that asked about a request, or
 // zero when there is none.
-func (n *Notifier) promptMessage(requestID string) int {
+func (n *Notifier) PromptMessage(requestID string) int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	for i, prompt := range n.prompts {
@@ -236,23 +287,49 @@ func (n *Notifier) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseU
 	return messageID, nil
 }
 
-// SendSessionRelease implements handlers.Notifier.
-func (n *Notifier) SendSessionRelease(req *models.ApprovalRequest) (int, error) {
+// UpdateWindowReport implements handlers.Notifier.
+func (n *Notifier) UpdateWindowReport(messageID int, r *models.WindowReport) error {
+	n.mu.Lock()
+	if n.failReleases || n.failEdits || n.deleted[messageID] {
+		n.mu.Unlock()
+		return errors.New("telegram refused the edit")
+	}
+	return n.report(messageID, false, r)
+}
+
+// SendWindowReport implements handlers.Notifier.
+func (n *Notifier) SendWindowReport(r *models.WindowReport) (int, error) {
 	n.mu.Lock()
 	if n.failReleases {
 		n.mu.Unlock()
 		return 0, errors.New("telegram is unreachable")
 	}
-	n.releases = append(n.releases, *req)
-	messageID := len(n.releases)
+	n.reportMessages++
+	messageID := firstReportMessage + n.reportMessages
+	return messageID, n.report(messageID, true, r)
+}
+
+// report records r as shown on messageID and releases n.mu, which the caller
+// holds. A report that lists more releases than the window's last one runs the
+// WhileReleaseIsSent hook.
+func (n *Notifier) report(messageID int, isNew bool, r *models.WindowReport) error {
+	shown := 0
+	for _, prev := range n.reports {
+		if prev.Report.SessionID == r.SessionID {
+			shown = prev.Report.Released
+		}
+	}
+	report := *r
+	report.Recent = append([]models.ApprovalRequest(nil), r.Recent...)
+	n.reports = append(n.reports, WindowReport{MessageID: messageID, New: isNew, Report: report})
 	onRelease := n.onRelease
 	n.mu.Unlock()
 
 	// A tap records its own answer, so it runs with the lock released.
-	if onRelease != nil {
+	if onRelease != nil && r.Released > shown {
 		onRelease()
 	}
-	return messageID, nil
+	return nil
 }
 
 // SendSessionEnded implements handlers.Notifier.

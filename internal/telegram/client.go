@@ -142,7 +142,7 @@ func (c *Client) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL
 	if req.SessionTTL > 0 {
 		label := windowLabel(req.SessionTTL)
 		text += fmt.Sprintf(
-			"\n\n<b>Approve for %s:</b> later requests from %s are released without asking, each one reported here.",
+			"\n\n<b>Approve for %s:</b> later requests from %s are released without asking and listed in this message.",
 			label, code(req.RequesterMachine))
 		keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, []InlineKeyboardButton{
 			{Text: "🕗 Approve for " + label, CallbackData: fmt.Sprintf("session:%s", req.ID)},
@@ -157,32 +157,133 @@ func (c *Client) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL
 	})
 }
 
-// SendSessionRelease reports a request that was released under an open
-// approval window. It is silent, and carries the button that ends the window.
-func (c *Client) SendSessionRelease(req *models.ApprovalRequest) (int, error) {
-	text := fmt.Sprintf(
-		"🔓 <b>Secret Released (approval window)</b>\n\n"+
-			"%s"+
-			"<b>Machine:</b> %s\n"+
-			"<b>IP:</b> %s\n"+
-			"<b>Reason:</b> %s\n"+
-			"<b>Window ends:</b> %s\n\n"+
-			"<b>Request ID:</b> %s",
-		describeSecrets(req),
-		code(req.RequesterMachine),
-		code(req.RequesterIP),
-		html.EscapeString(defaultIfEmpty(req.Reason, "Not provided")),
-		req.SessionExpiresAt.Format("15:04:05 MST"),
-		code(req.ID),
-	)
+// UpdateWindowReport rewrites the message that reports an approval window. An
+// edit does not notify the approver, so releases under the window stay quiet.
+func (c *Client) UpdateWindowReport(messageID int, r *models.WindowReport) error {
+	return c.editMessage(messageID, windowReportText(r), endSessionKeyboard(r.SessionID))
+}
 
+// SendWindowReport reports an approval window in a new, silent message, for
+// when the message that reported it can no longer be edited. The report is
+// shown as moved, whether or not r says so.
+func (c *Client) SendWindowReport(r *models.WindowReport) (int, error) {
+	moved := *r
+	moved.Moved = true
 	return c.sendMessage(SendMessageRequest{
 		ChatID:              c.chatID,
-		Text:                text,
+		Text:                windowReportText(&moved),
 		ParseMode:           "HTML",
-		ReplyMarkup:         endSessionKeyboard(req.SessionID),
+		ReplyMarkup:         endSessionKeyboard(r.SessionID),
 		DisableNotification: true,
 	})
+}
+
+const (
+	// maxMessageLength is Telegram's limit on the text of a message.
+	maxMessageLength = 4096
+	// Each release a window report lists shows at most this much of the request.
+	maxReleaseSecrets    = 5
+	maxReleaseNameLength = 40
+	maxReleaseReason     = 80
+)
+
+// movedNote ends a report that continues in a new message.
+const movedNote = "\n\n<i>The approval message could not be updated, so this report continues here.</i>"
+
+// windowReportText renders a window report.
+func windowReportText(r *models.WindowReport) string {
+	note := ""
+	if r.Moved {
+		note = movedNote
+	}
+	text := windowHeader(r, true) + windowReleases(r) + note
+	// Bytes are never fewer than the characters Telegram counts.
+	if len(text) > maxMessageLength {
+		text = windowHeader(r, false) + windowReleases(r) + note
+	}
+	return text
+}
+
+// windowHeader describes the window and the approval that opened it. Without
+// listSecrets, a batch that opened it is only counted, for a report that would
+// not fit otherwise.
+func windowHeader(r *models.WindowReport, listSecrets bool) string {
+	window := fmt.Sprintf(
+		"<b>Approval window:</b> open until %s. Requests from %s are released without asking and listed in this message.",
+		r.ExpiresAt.Format("15:04:05 MST"), code(r.Machine))
+
+	if r.Opened == nil {
+		return fmt.Sprintf("🔓 <b>Approval Window</b>\n\n<b>Machine:</b> %s\n\n%s", code(r.Machine), window)
+	}
+
+	secrets := describeSecrets(r.Opened)
+	if !listSecrets {
+		secrets = fmt.Sprintf("<b>Secrets:</b> %d items\n", len(r.Opened.Secrets))
+	}
+	return fmt.Sprintf(
+		"✅ <b>Secret Access Approved</b>\n\n"+
+			"%s"+
+			"<b>Machine:</b> %s\n"+
+			"<b>Approved by:</b> @%s\n"+
+			"<b>Request ID:</b> %s\n\n"+
+			"%s",
+		secrets,
+		code(r.Machine),
+		html.EscapeString(r.Approver),
+		code(r.Opened.ID),
+		window,
+	)
+}
+
+// windowReleases counts the releases under a window and lists the latest.
+func windowReleases(r *models.WindowReport) string {
+	if r.Released == 0 {
+		return "\n\n<b>Released under this window:</b> none yet"
+	}
+
+	text := fmt.Sprintf("\n\n<b>Released under this window:</b> %d", r.Released)
+	if r.Released > len(r.Recent) {
+		text += fmt.Sprintf(", latest %d:", len(r.Recent))
+	}
+	for i := range r.Recent {
+		text += "\n• " + releaseLine(&r.Recent[i], r.Opened)
+	}
+	return text
+}
+
+// releaseLine is one release in a window report: when, what, and why. The IP is
+// shown only when it is not the one the window was opened from.
+func releaseLine(req, opened *models.ApprovalRequest) string {
+	names := []string{req.SecretName}
+	if len(req.Secrets) > 1 {
+		names = make([]string, len(req.Secrets))
+		for i, s := range req.Secrets {
+			names[i] = s.SecretName
+		}
+	}
+
+	shown := make([]string, 0, maxReleaseSecrets)
+	for _, name := range names[:min(len(names), maxReleaseSecrets)] {
+		shown = append(shown, code(cut(name, maxReleaseNameLength)))
+	}
+	line := req.RequestedAt.Format("15:04:05") + " " + strings.Join(shown, ", ")
+	if more := len(names) - len(shown); more > 0 {
+		line += fmt.Sprintf(" +%d more", more)
+	}
+
+	if opened == nil || req.RequesterIP != opened.RequesterIP {
+		line += " from " + code(req.RequesterIP)
+	}
+	return line + " — " + html.EscapeString(cut(defaultIfEmpty(req.Reason, "no reason given"), maxReleaseReason))
+}
+
+// cut shortens s to at most n characters, marking the cut with an ellipsis.
+func cut(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "…"
 }
 
 // SendSessionEnded reports that approval windows of a machine were ended.
@@ -220,8 +321,19 @@ func stillOpenNote(stillOpen int) string {
 	}
 }
 
-// UpdateMessageApproved updates a message to show it was approved
+// UpdateMessageApproved updates a message to show it was approved. When the
+// approval opened a window, the message becomes the window's report.
 func (c *Client) UpdateMessageApproved(messageID int, req *models.ApprovalRequest, approver string) error {
+	if req.SessionID != "" {
+		return c.UpdateWindowReport(messageID, &models.WindowReport{
+			SessionID: req.SessionID,
+			Machine:   req.RequesterMachine,
+			ExpiresAt: req.SessionExpiresAt,
+			Opened:    req,
+			Approver:  approver,
+		})
+	}
+
 	text := fmt.Sprintf(
 		"✅ <b>Secret Access Approved</b>\n\n"+
 			"%s"+
@@ -234,16 +346,7 @@ func (c *Client) UpdateMessageApproved(messageID int, req *models.ApprovalReques
 		code(req.ID),
 	)
 
-	if req.SessionID == "" {
-		return c.editMessage(messageID, text, nil)
-	}
-
-	text += fmt.Sprintf(
-		"\n\n<b>Approval window:</b> open until %s. Requests from %s are released without asking, each one reported here.",
-		req.SessionExpiresAt.Format("15:04:05 MST"),
-		code(req.RequesterMachine))
-
-	return c.editMessage(messageID, text, endSessionKeyboard(req.SessionID))
+	return c.editMessage(messageID, text, nil)
 }
 
 // UpdateMessageDenied updates a message to show it was denied

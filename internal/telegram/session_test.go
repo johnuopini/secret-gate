@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -133,15 +134,85 @@ func TestUpdateMessageApproved_WithoutAWindow_HasNoButtons(t *testing.T) {
 	}
 }
 
-func TestSendSessionRelease_IsSilentAndCarriesTheEndButton(t *testing.T) {
-	c, calls := recordingAPI(t)
-	req := testRequest()
-	req.SessionID = "fedcba9876543210fedcba9876543210"
-	req.SessionExpiresAt = time.Now().Add(8 * time.Hour)
+// testReport is the report of a window opened by testRequest and approved by
+// franz, with released requests released so far and recent the latest of them.
+func testReport(released int, recent ...models.ApprovalRequest) *models.WindowReport {
+	opened := testRequest()
+	opened.SessionID = "fedcba9876543210fedcba9876543210"
+	opened.SessionExpiresAt = time.Now().Add(8 * time.Hour)
+	return &models.WindowReport{
+		SessionID: opened.SessionID,
+		Machine:   opened.RequesterMachine,
+		ExpiresAt: opened.SessionExpiresAt,
+		Opened:    opened,
+		Approver:  "franz",
+		Released:  released,
+		Recent:    recent,
+	}
+}
 
-	msgID, err := c.SendSessionRelease(req)
+// release is a request from the window's machine for secret, sent from ip.
+func release(secret, ip, reason string) models.ApprovalRequest {
+	req := *testRequest()
+	req.SecretName = secret
+	req.RequesterIP = ip
+	req.Reason = reason
+	return req
+}
+
+func TestUpdateWindowReport_EditsTheMessageWithTheReleases(t *testing.T) {
+	c, calls := recordingAPI(t)
+	var recent []models.ApprovalRequest
+	for _, secret := range []string{"s1", "s2", "s3", "s4", "s5"} {
+		recent = append(recent, release(secret, "10.0.0.7", "reason of "+secret))
+	}
+	report := testReport(7, recent...)
+
+	if err := c.UpdateWindowReport(77, report); err != nil {
+		t.Fatalf("UpdateWindowReport: %v", err)
+	}
+
+	call := (*calls)[0]
+	if call.Method != "editMessageText" || call.Body["message_id"] != float64(77) {
+		t.Errorf("sent %s for message %v, want editMessageText for message 77", call.Method, call.Body["message_id"])
+	}
+	if got := buttonData(t, call); len(got) != 1 || got[0] != "endsession:"+report.SessionID {
+		t.Errorf("buttons = %v, want the end button for the session", got)
+	}
+	text := call.Body["text"].(string)
+	for _, want := range []string{"Released under this window:</b> 7", "s1", "s5", "reason of s3"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("report does not show %q:\n%s", want, text)
+		}
+	}
+	if lines := strings.Count(text, "\n• "); lines != 5 {
+		t.Errorf("report lists %d releases, want 5:\n%s", lines, text)
+	}
+}
+
+func TestUpdateMessageApproved_WithAWindow_ShowsTheEmptyReport(t *testing.T) {
+	c, calls := recordingAPI(t)
+	report := testReport(0)
+
+	c.UpdateMessageApproved(77, report.Opened, "franz")
+	c.UpdateWindowReport(77, report)
+
+	approved, empty := (*calls)[0].Body["text"].(string), (*calls)[1].Body["text"].(string)
+	if approved != empty {
+		t.Errorf("the approved message:\n%s\nis not the report of a window with no releases:\n%s", approved, empty)
+	}
+	if !strings.Contains(approved, "Released under this window:</b> none yet") {
+		t.Errorf("the approved message does not say nothing was released yet:\n%s", approved)
+	}
+}
+
+func TestSendWindowReport_IsSilentAndCarriesTheEndButton(t *testing.T) {
+	c, calls := recordingAPI(t)
+	report := testReport(1, release("db", "10.0.0.7", "deploy"))
+
+	msgID, err := c.SendWindowReport(report)
 	if err != nil {
-		t.Fatalf("SendSessionRelease: %v", err)
+		t.Fatalf("SendWindowReport: %v", err)
 	}
 
 	call := (*calls)[0]
@@ -149,16 +220,75 @@ func TestSendSessionRelease_IsSilentAndCarriesTheEndButton(t *testing.T) {
 		t.Errorf("sent %s returning message %d, want sendMessage returning 77", call.Method, msgID)
 	}
 	if call.Body["disable_notification"] != true {
-		t.Error("the release notice is not silent")
+		t.Error("the moved report is not silent")
 	}
-	if got := buttonData(t, call); len(got) != 1 || got[0] != "endsession:"+req.SessionID {
+	if got := buttonData(t, call); len(got) != 1 || got[0] != "endsession:"+report.SessionID {
 		t.Errorf("buttons = %v, want the end button for the session", got)
 	}
 	text := call.Body["text"].(string)
-	for _, want := range []string{"db", "devvm", "10.0.0.7", "deploy"} {
+	for _, want := range []string{"db", "devvm", "deploy", "could not be updated"} {
 		if !strings.Contains(text, want) {
-			t.Errorf("release notice does not name %q:\n%s", want, text)
+			t.Errorf("moved report does not show %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestUpdateWindowReport_OfAMovedReport_KeepsSayingWhyItMoved(t *testing.T) {
+	c, calls := recordingAPI(t)
+	moved := testReport(2, release("db", "10.0.0.7", "deploy"))
+	moved.Moved = true
+
+	c.UpdateWindowReport(77, testReport(1, release("db", "10.0.0.7", "deploy")))
+	c.UpdateWindowReport(78, moved)
+
+	if text := (*calls)[0].Body["text"].(string); strings.Contains(text, "could not be updated") {
+		t.Errorf("the report in the approval message says it moved:\n%s", text)
+	}
+	if text := (*calls)[1].Body["text"].(string); !strings.Contains(text, "could not be updated") {
+		t.Errorf("the moved report no longer says why it moved:\n%s", text)
+	}
+}
+
+func TestWindowReport_LongReasonAndBigBatch_StayShort(t *testing.T) {
+	c, calls := recordingAPI(t)
+
+	batch := release("", "10.0.0.7", strings.Repeat("x", 500))
+	for i := range 20 {
+		batch.Secrets = append(batch.Secrets, models.SecretRequest{SecretName: fmt.Sprintf("alpha%02d", i)})
+	}
+	report := testReport(5, batch, batch, batch, batch, batch)
+	// An opening batch too big to repeat in full.
+	for i := range 60 {
+		report.Opened.Secrets = append(report.Opened.Secrets, models.SecretRequest{SecretName: strings.Repeat("n", 50) + fmt.Sprint(i)})
+	}
+
+	c.UpdateWindowReport(77, report)
+
+	text := (*calls)[0].Body["text"].(string)
+	if strings.Contains(text, strings.Repeat("x", 81)) {
+		t.Error("a release shows more than 80 characters of its reason")
+	}
+	if !strings.Contains(text, "alpha04") || strings.Contains(text, "alpha05") || !strings.Contains(text, "+15 more") {
+		t.Errorf("a release of 20 secrets does not show the first 5 and +15 more:\n%s", text)
+	}
+	// Telegram rejects messages over 4096 characters.
+	if len(text) > 4096 {
+		t.Errorf("report is %d bytes, Telegram allows 4096 characters", len(text))
+	}
+}
+
+func TestWindowReport_ShowsAnIPOnlyWhenItDiffers(t *testing.T) {
+	c, calls := recordingAPI(t)
+	report := testReport(2, release("db", "10.0.0.9", "deploy"), release("db", "10.0.0.7", "deploy"))
+
+	c.UpdateWindowReport(77, report)
+
+	text := (*calls)[0].Body["text"].(string)
+	if !strings.Contains(text, "10.0.0.9") {
+		t.Errorf("a release from another IP does not show it:\n%s", text)
+	}
+	if strings.Contains(text, "10.0.0.7") {
+		t.Errorf("a release from the window's own IP shows it:\n%s", text)
 	}
 }
 
@@ -218,7 +348,7 @@ func TestButtonData_FitsTelegramsLimit(t *testing.T) {
 	req.SessionExpiresAt = time.Now().Add(8 * time.Hour)
 
 	c.SendApprovalRequest(req, "")
-	c.SendSessionRelease(req)
+	c.SendWindowReport(testReport(0))
 
 	// Telegram rejects callback_data longer than 64 bytes.
 	for _, call := range *calls {
