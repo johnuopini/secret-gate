@@ -272,12 +272,124 @@ func TestWindowReport_LongReasonAndBigBatch_StayShort(t *testing.T) {
 	if strings.Contains(text, strings.Repeat("v", 41)) {
 		t.Error("a release shows more than 40 characters of a vault")
 	}
-	if !strings.Contains(text, "alpha04") || strings.Contains(text, "alpha05") || !strings.Contains(text, "+15 more") {
-		t.Errorf("a release of 20 secrets does not show the first 5 and +15 more:\n%s", text)
+	if !strings.Contains(text, "alpha00") || !strings.Contains(text, "alpha19") || strings.Contains(text, "more") {
+		t.Errorf("the latest release does not list all 20 of its secrets:\n%s", text)
 	}
 	// Telegram rejects messages over 4096 characters.
 	if len(text) > 4096 {
 		t.Errorf("report is %d bytes, Telegram allows 4096 characters", len(text))
+	}
+}
+
+func TestWindowReport_ListsEverySecretOfAReleasedBatch(t *testing.T) {
+	c, calls := recordingAPI(t)
+	batch := release("", "10.0.0.7", "deploy")
+	for i := range 8 {
+		batch.Secrets = append(batch.Secrets, models.SecretRequest{SecretName: fmt.Sprintf("alpha%02d", i), Vault: "Dev"})
+	}
+
+	c.UpdateWindowReport(77, testReport(1, batch))
+
+	text := (*calls)[0].Body["text"].(string)
+	for i := range 8 {
+		if want := fmt.Sprintf("<code>alpha%02d</code> in <code>Dev</code>", i); !strings.Contains(text, want) {
+			t.Errorf("report does not show %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "more") {
+		t.Errorf("report hides part of the batch:\n%s", text)
+	}
+}
+
+func TestWindowReport_TooLong_DropsOlderReleasesBeforeTheLatest(t *testing.T) {
+	c, calls := recordingAPI(t)
+	batch := func(prefix string) models.ApprovalRequest {
+		r := release("", "10.0.0.7", "deploy")
+		for i := range 20 {
+			r.Secrets = append(r.Secrets, models.SecretRequest{SecretName: fmt.Sprintf("%s%02d-%s", prefix, i, strings.Repeat("n", 30))})
+		}
+		return r
+	}
+
+	c.UpdateWindowReport(77, testReport(9, batch("new"), batch("old"), batch("old"), batch("old"), batch("old")))
+
+	text := (*calls)[0].Body["text"].(string)
+	if len(text) > 4096 {
+		t.Fatalf("report is %d bytes, Telegram allows 4096 characters", len(text))
+	}
+	for i := range 20 {
+		if want := fmt.Sprintf("new%02d", i); !strings.Contains(text, want) {
+			t.Errorf("the latest release does not show %q:\n%s", want, text)
+		}
+	}
+	if lines := strings.Count(text, "\n• "); lines >= 5 {
+		t.Errorf("report lists %d releases, want older ones left out to fit:\n%s", lines, text)
+	}
+	if want := fmt.Sprintf("Released under this window:</b> 9, latest %d:", strings.Count(text, "\n• ")); !strings.Contains(text, want) {
+		t.Errorf("report does not say %q:\n%s", want, text)
+	}
+}
+
+func TestWindowReport_ThatCannotShowTheLatestReleaseInFull_IsNotSent(t *testing.T) {
+	huge := release("", "10.0.0.7", "deploy")
+	for i := range 200 {
+		huge.Secrets = append(huge.Secrets, models.SecretRequest{SecretName: fmt.Sprintf("%03d-%s", i, strings.Repeat("n", 36))})
+	}
+
+	c, calls := recordingAPI(t)
+	if err := c.UpdateWindowReport(77, testReport(1, huge)); !errors.Is(err, ErrReportTooLong) {
+		t.Errorf("UpdateWindowReport = %v, want ErrReportTooLong", err)
+	}
+	if _, err := c.SendWindowReport(testReport(1, huge)); !errors.Is(err, ErrReportTooLong) {
+		t.Errorf("SendWindowReport = %v, want ErrReportTooLong", err)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("sent %d calls to Telegram, want none", len(*calls))
+	}
+}
+
+func TestWindowReport_ReleaseWithoutAVault_DoesNotShowThePlaceholder(t *testing.T) {
+	c, calls := recordingAPI(t)
+	anyVault := release("queue", "10.0.0.7", "deploy")
+	anyVault.Vault = "_auto_"
+
+	c.UpdateWindowReport(77, testReport(1, anyVault))
+
+	text := (*calls)[0].Body["text"].(string)
+	if !strings.Contains(text, "<code>queue</code> — ") || strings.Contains(text, "_auto_") {
+		t.Errorf("a release without a vault does not show just its name:\n%s", text)
+	}
+}
+
+func TestWindowReport_ComparesAndShowsOnlyTheHostOfAnIP(t *testing.T) {
+	c, calls := recordingAPI(t)
+	report := testReport(3,
+		release("db", "10.0.0.9:40001", "deploy"),
+		release("db", "[2001:db8::1]:40002", "deploy"),
+		release("db", "10.0.0.7:51240", "deploy"))
+	report.Opened.RequesterIP = "10.0.0.7:51234"
+
+	c.UpdateWindowReport(77, report)
+
+	text := (*calls)[0].Body["text"].(string)
+	for _, want := range []string{"from <code>10.0.0.9</code>", "from <code>2001:db8::1</code>"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("report does not show %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "10.0.0.7") {
+		t.Errorf("a release from the window's own host on another port shows its IP:\n%s", text)
+	}
+}
+
+func TestWindowReport_LongForwardedFor_IsCut(t *testing.T) {
+	c, calls := recordingAPI(t)
+
+	c.UpdateWindowReport(77, testReport(1, release("db", strings.Repeat("9", 500), "deploy")))
+
+	text := (*calls)[0].Body["text"].(string)
+	if !strings.Contains(text, strings.Repeat("9", 64)+"…") || strings.Contains(text, strings.Repeat("9", 65)) {
+		t.Errorf("a release does not show exactly 64 characters of a long IP:\n%s", text)
 	}
 }
 

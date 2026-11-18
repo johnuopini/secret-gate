@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -160,7 +161,11 @@ func (c *Client) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseURL
 // UpdateWindowReport rewrites the message that reports an approval window. An
 // edit does not notify the approver, so releases under the window stay quiet.
 func (c *Client) UpdateWindowReport(messageID int, r *models.WindowReport) error {
-	return c.editMessage(messageID, windowReportText(r), endSessionKeyboard(r.SessionID))
+	text, err := windowReportText(r)
+	if err != nil {
+		return err
+	}
+	return c.editMessage(messageID, text, endSessionKeyboard(r.SessionID))
 }
 
 // SendWindowReport reports an approval window in a new, silent message, for
@@ -169,9 +174,13 @@ func (c *Client) UpdateWindowReport(messageID int, r *models.WindowReport) error
 func (c *Client) SendWindowReport(r *models.WindowReport) (int, error) {
 	moved := *r
 	moved.Moved = true
+	text, err := windowReportText(&moved)
+	if err != nil {
+		return 0, err
+	}
 	return c.sendMessage(SendMessageRequest{
 		ChatID:              c.chatID,
-		Text:                windowReportText(&moved),
+		Text:                text,
 		ParseMode:           "HTML",
 		ReplyMarkup:         endSessionKeyboard(r.SessionID),
 		DisableNotification: true,
@@ -181,27 +190,44 @@ func (c *Client) SendWindowReport(r *models.WindowReport) (int, error) {
 const (
 	// maxMessageLength is Telegram's limit on the text of a message.
 	maxMessageLength = 4096
-	// Each release a window report lists shows at most this much of the request.
-	maxReleaseSecrets    = 5
+	// Each release a window report lists shows at most this much of each
+	// value. Every secret of a release is listed.
 	maxReleaseNameLength = 40
+	maxReleaseIPLength   = 64
 	maxReleaseReason     = 80
 )
+
+// autoVault is the vault the gate records for a secret requested without one.
+const autoVault = "_auto_"
 
 // movedNote ends a report that continues in a new message.
 const movedNote = "\n\n<i>The approval message could not be updated, so this report continues here.</i>"
 
-// windowReportText renders a window report.
-func windowReportText(r *models.WindowReport) string {
+// windowReportText renders a window report. When it does not fit in a
+// message, the batch that opened the window is only counted, and then the
+// oldest releases are left out. A report that cannot show its latest release
+// in full returns ErrReportTooLong.
+func windowReportText(r *models.WindowReport) (string, error) {
 	note := ""
 	if r.Moved {
 		note = movedNote
 	}
-	text := windowHeader(r, true) + windowReleases(r) + note
 	// Bytes are never fewer than the characters Telegram counts.
-	if len(text) > maxMessageLength {
-		text = windowHeader(r, false) + windowReleases(r) + note
+	if text := windowHeader(r, true) + windowReleases(r) + note; len(text) <= maxMessageLength {
+		return text, nil
 	}
-	return text
+
+	header := windowHeader(r, false)
+	shown := *r
+	for {
+		if text := header + windowReleases(&shown) + note; len(text) <= maxMessageLength {
+			return text, nil
+		}
+		if len(shown.Recent) <= 1 {
+			return "", ErrReportTooLong
+		}
+		shown.Recent = shown.Recent[:len(shown.Recent)-1]
+	}
 }
 
 // windowHeader describes the window and the approval that opened it. Without
@@ -260,23 +286,31 @@ func releaseLine(req, opened *models.ApprovalRequest) string {
 		secrets = req.Secrets
 	}
 
-	shown := make([]string, 0, maxReleaseSecrets)
-	for _, s := range secrets[:min(len(secrets), maxReleaseSecrets)] {
+	shown := make([]string, 0, len(secrets))
+	for _, s := range secrets {
 		name := code(cut(s.SecretName, maxReleaseNameLength))
-		if s.Vault != "" {
+		if s.Vault != "" && s.Vault != autoVault {
 			name += " in " + code(cut(s.Vault, maxReleaseNameLength))
 		}
 		shown = append(shown, name)
 	}
 	line := req.RequestedAt.Format("15:04:05") + " " + strings.Join(shown, ", ")
-	if more := len(secrets) - len(shown); more > 0 {
-		line += fmt.Sprintf(" +%d more", more)
-	}
 
-	if opened == nil || req.RequesterIP != opened.RequesterIP {
-		line += " from " + code(req.RequesterIP)
+	host := requesterHost(req.RequesterIP)
+	if opened == nil || host != requesterHost(opened.RequesterIP) {
+		line += " from " + code(cut(host, maxReleaseIPLength))
 	}
 	return line + " — " + html.EscapeString(cut(defaultIfEmpty(req.Reason, "no reason given"), maxReleaseReason))
+}
+
+// requesterHost is the host part of a requester address. A client that talks
+// to the gate directly is seen as host:port, with a new port for every
+// connection; a forwarded address has no port and is returned as it is.
+func requesterHost(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
 }
 
 // cut shortens s to at most n characters, marking the cut with an ellipsis.
@@ -641,6 +675,10 @@ func editError(description string) error {
 // ErrMessageGone is the error for an edit of a message that is no longer there
 // or can no longer be edited, as when the approver deleted it.
 var ErrMessageGone = errors.New("the message can no longer be edited")
+
+// ErrReportTooLong is the error for a window report that does not fit in a
+// Telegram message even when it shows only its latest release.
+var ErrReportTooLong = errors.New("the window report does not fit in a Telegram message")
 
 // withoutURL drops the request URL from an HTTP client error. The URL carries
 // the bot token, and these errors end up in the server log.
