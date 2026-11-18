@@ -1,8 +1,11 @@
 package handlers_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -235,6 +238,118 @@ func TestRequest_UnderAnOpenWindow_IsReleasedWithoutAsking(t *testing.T) {
 	}
 }
 
+func TestRequest_UnderAnOpenWindow_EditsTheWindowMessage(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	windowToken := openWindow(t, gate)
+	approvalMessage := gate.Notifier.PromptMessage(gate.Notifier.Prompts()[0].ID)
+
+	for _, secret := range []string{"db", "llm-proxy"} {
+		if code, _ := askFromWindowClient(t, gate, "devvm", secret, windowToken); code != http.StatusAccepted {
+			t.Fatalf("POST /request for %s = %d, want %d", secret, code, http.StatusAccepted)
+		}
+	}
+
+	reports := gate.Notifier.WindowReports()
+	if len(reports) != 2 {
+		t.Fatalf("approver was shown %d window reports, want 2", len(reports))
+	}
+	for i, r := range reports {
+		if r.New || r.MessageID != approvalMessage {
+			t.Errorf("report %d went to message %d (new: %v), want an edit of the approval message %d", i, r.MessageID, r.New, approvalMessage)
+		}
+		if r.Report.Released != i+1 {
+			t.Errorf("report %d counts %d releases, want %d", i, r.Report.Released, i+1)
+		}
+	}
+	recent := reports[1].Report.Recent
+	if len(recent) != 2 || recent[0].SecretName != "llm-proxy" || recent[1].SecretName != "db" {
+		t.Errorf("report lists %+v, want llm-proxy then db, newest first", recent)
+	}
+	for _, r := range recent {
+		if r.Token != "" || r.SessionToken != "" {
+			t.Error("the window report keeps a request token")
+		}
+	}
+	if n := len(gate.Notifier.Ended()); n != 0 {
+		t.Errorf("approver was told %d windows ended, want none", n)
+	}
+}
+
+func TestRequest_UnderAWindow_WhenTheWindowMessageIsGone_MovesTheReportToOneNewMessage(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	windowToken := openWindow(t, gate)
+	gate.Notifier.DeleteMessage(gate.Notifier.PromptMessage(gate.Notifier.Prompts()[0].ID))
+
+	for _, secret := range []string{"db", "llm-proxy"} {
+		if code, _ := askFromWindowClient(t, gate, "devvm", secret, windowToken); code != http.StatusAccepted {
+			t.Fatalf("POST /request for %s = %d, want %d", secret, code, http.StatusAccepted)
+		}
+	}
+
+	reports := gate.Notifier.WindowReports()
+	if len(reports) != 2 || !reports[0].New || reports[1].New || reports[1].MessageID != reports[0].MessageID {
+		t.Fatalf("reports = %+v, want one new message, then an edit of it", reports)
+	}
+	if last := reports[1].Report; last.Released != 2 || !last.Moved {
+		t.Errorf("last report counts %d releases (moved: %v), want 2, marked as moved", last.Released, last.Moved)
+	}
+}
+
+func TestRequest_UnderAWindow_WhenTelegramRefusesTheEditForAnotherReason_IsRefusedAndTheReportStays(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	windowToken := openWindow(t, gate)
+	gate.Notifier.FailEdits()
+
+	code, reply := askFromWindowClient(t, gate, "devvm", "db", windowToken)
+
+	if code != http.StatusServiceUnavailable || reply.Token != "" {
+		t.Errorf("POST /request = %d with token %q, want %d without one", code, reply.Token, http.StatusServiceUnavailable)
+	}
+	for _, r := range gate.Notifier.WindowReports() {
+		if r.New {
+			t.Errorf("report moved to new message %d, although the window message is still there", r.MessageID)
+		}
+	}
+}
+
+func TestRequest_UnderAWindow_ConcurrentReleases_AreAllCounted(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	windowToken := openWindow(t, gate)
+	body, _ := json.Marshal(handlers.BatchRequestPayload{
+		SecretName: "db", Vault: gatetest.Vault, Machine: "devvm", Reason: "test", Session: true, SessionToken: windowToken,
+	})
+
+	const requests = 10
+	codes := make([]int, requests)
+	var wg sync.WaitGroup
+	for i := range requests {
+		wg.Go(func() {
+			resp, err := http.Post(gate.URL+"/request", "application/json", bytes.NewReader(body))
+			if err != nil {
+				return
+			}
+			resp.Body.Close()
+			codes[i] = resp.StatusCode
+		})
+	}
+	wg.Wait()
+
+	for i, code := range codes {
+		if code != http.StatusAccepted {
+			t.Errorf("request %d = %d, want %d", i, code, http.StatusAccepted)
+		}
+	}
+	reports := gate.Notifier.WindowReports()
+	if len(reports) != requests {
+		t.Fatalf("approver was shown %d window reports, want %d", len(reports), requests)
+	}
+	for i, r := range reports {
+		if r.Report.Released != i+1 {
+			t.Errorf("report %d counts %d releases, want %d", i, r.Report.Released, i+1)
+		}
+	}
+}
+
 func TestRequest_WithAWindowTokenThatDoesNotCoverIt_AsksAgain(t *testing.T) {
 	cases := map[string]struct {
 		machine string
@@ -319,6 +434,9 @@ func TestRequest_UnderAWindowEndedWhileTheApproverIsTold_AsksInstead(t *testing.
 	}
 	if n := len(gate.Notifier.Prompts()); n != 2 {
 		t.Errorf("approver was asked %d times, want again for the request the ended window no longer covers", n)
+	}
+	if releases := gate.Notifier.Releases(); len(releases) != 0 {
+		t.Errorf("the window report still lists %d releases, want the one the ended window did not make taken back", len(releases))
 	}
 }
 

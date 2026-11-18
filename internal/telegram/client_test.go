@@ -39,8 +39,22 @@ func TestMessages_ShowEveryRequestValueExactlyAsSent(t *testing.T) {
 	req.SessionID = "fedcba9876543210fedcba9876543210"
 	req.SessionExpiresAt = time.Now().Add(8 * time.Hour)
 
+	// Released from another IP than the window was opened from, so the report
+	// shows it.
+	opened := *req
+	opened.RequesterIP = "10.0.0.1"
+	report := &models.WindowReport{
+		SessionID: req.SessionID,
+		Machine:   req.RequesterMachine,
+		ExpiresAt: req.SessionExpiresAt,
+		Opened:    &opened,
+		Approver:  "fr_anz",
+		Released:  1,
+		Recent:    []models.ApprovalRequest{*req},
+	}
+
 	c.SendApprovalRequest(req, "")
-	c.SendSessionRelease(req)
+	c.SendWindowReport(report)
 	c.UpdateMessageApproved(77, req, "fr_anz")
 	c.UpdateMessageDenied(77, req, "fr_anz")
 	c.SendSessionEnded(req.RequesterMachine, "@fr_anz", 0)
@@ -101,8 +115,14 @@ func TestTransportErrors_DoNotContainBotToken(t *testing.T) {
 		"UpdateMessageApproved": func(c *Client) error {
 			return c.UpdateMessageApproved(7, req, "approver")
 		},
-		"SendSessionRelease": func(c *Client) error { _, err := c.SendSessionRelease(req); return err },
-		"SendSessionEnded":   func(c *Client) error { return c.SendSessionEnded("devvm", "approver", 0) },
+		"UpdateWindowReport": func(c *Client) error {
+			return c.UpdateWindowReport(7, &models.WindowReport{Machine: "devvm", Opened: req, Released: 1, Recent: []models.ApprovalRequest{*req}})
+		},
+		"SendWindowReport": func(c *Client) error {
+			_, err := c.SendWindowReport(&models.WindowReport{Machine: "devvm", Opened: req, Released: 1, Recent: []models.ApprovalRequest{*req}})
+			return err
+		},
+		"SendSessionEnded": func(c *Client) error { return c.SendSessionEnded("devvm", "approver", 0) },
 	}
 
 	for name, call := range calls {

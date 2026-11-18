@@ -48,6 +48,19 @@ type ApprovalRequest struct {
 	SessionReleased  bool          `json:"-"` // approved by an open window, not by a tap on this request
 }
 
+// WindowReport is what the approver is shown about an approval window: the
+// request whose approval opened it and the requests released under it since.
+type WindowReport struct {
+	SessionID string
+	Machine   string
+	ExpiresAt time.Time
+	Opened    *ApprovalRequest // the request that opened the window, nil when unknown
+	Approver  string
+	Released  int               // requests released under the window so far
+	Recent    []ApprovalRequest // the latest of them, newest first
+	Moved     bool              // the report left the approval message for a new one
+}
+
 // SecretValue holds the retrieved secret data
 type SecretValue struct {
 	Fields map[string]string `json:"fields"`

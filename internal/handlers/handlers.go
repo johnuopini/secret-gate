@@ -25,7 +25,8 @@ type Notifier interface {
 	UpdateMessageApproved(messageID int, req *models.ApprovalRequest, approver string) error
 	UpdateMessageDenied(messageID int, req *models.ApprovalRequest, denier string) error
 	AnswerCallbackQuery(callbackID, text string) error
-	SendSessionRelease(req *models.ApprovalRequest) (int, error)
+	UpdateWindowReport(messageID int, r *models.WindowReport) error
+	SendWindowReport(r *models.WindowReport) (int, error)
 	SendSessionEnded(machine, endedBy string, stillOpen int) error
 }
 
@@ -35,6 +36,7 @@ type Handler struct {
 	sessions *session.Store
 	opClient *opconnect.Client
 	notifier Notifier
+	windows  *windowLogs
 	config   *config.Config
 	log      *logger.Logger
 }
@@ -46,6 +48,7 @@ func New(s *store.Store, sessions *session.Store, op *opconnect.Client, notifier
 		sessions: sessions,
 		opClient: op,
 		notifier: notifier,
+		windows:  newWindowLogs(),
 		config:   cfg,
 		log:      logger.New(),
 	}
@@ -291,25 +294,24 @@ func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // releaseUnderSession approves req under the open approval window that token
-// belongs to, and answers the client. The approver is told first: a release
-// that cannot be reported does not happen.
+// belongs to, and answers the client. The approver is shown the release first,
+// in the window's report: a release that cannot be shown does not happen.
 //
 // It reports false, with nothing answered, when the approver ended the window
-// while the notice was on its way. The request then has to be asked about like
-// any other; the notice already sent carries the same request ID as that
-// prompt.
+// while the report was on its way. The release is taken back from the report,
+// and the request has to be asked about like any other.
 func (h *Handler) releaseUnderSession(w http.ResponseWriter, req *models.ApprovalRequest, token string, sess session.Session) bool {
 	req.SessionID = sess.ID
 	req.SessionExpiresAt = sess.ExpiresAt
 
-	msgID, err := h.notifier.SendSessionRelease(req)
+	msgID, open, err := h.reportRelease(sess, token, req)
 	if err != nil {
 		h.log.Error("Failed to report release under approval window", logger.F("error", err.Error(), "request_id", req.ID))
 		h.writeError(w, http.StatusServiceUnavailable, "notify_failed", "Could not notify the approver, so nothing was released. Try again.")
 		return true
 	}
 
-	if _, open := h.sessions.Lookup(token); !open {
+	if !open {
 		h.log.Info("Approval window ended before the release", logger.F("request_id", req.ID, "session_id", sess.ID))
 		req.SessionID = ""
 		req.SessionExpiresAt = time.Time{}
@@ -636,9 +638,11 @@ func (h *Handler) HandleCallback(callback *telegram.CallbackQuery) {
 		// the window only counts once that message is in front of the approver.
 		// Until then nothing is approved and the token is on no request.
 		shown := *req
+		shown.Token = ""
 		shown.SessionID = sess.ID
 		shown.SessionExpiresAt = sess.ExpiresAt
-		if err := h.showWindow(callback, &shown, approver); err != nil {
+		messageID, err := h.showWindow(callback, &shown, approver)
+		if err != nil {
 			h.sessions.Discard(sess.ID)
 			req.Approve()
 			if err := h.store.Update(req); err != nil {
@@ -652,6 +656,15 @@ func (h *Handler) HandleCallback(callback *telegram.CallbackQuery) {
 			))
 			return
 		}
+
+		// Releases under the window are reported on the same message.
+		h.windows.open(messageID, models.WindowReport{
+			SessionID: sess.ID,
+			Machine:   sess.Machine,
+			ExpiresAt: sess.ExpiresAt,
+			Opened:    &shown,
+			Approver:  approver,
+		})
 
 		req.SessionToken = token
 		req.SessionID = sess.ID
@@ -696,17 +709,18 @@ func (h *Handler) HandleCallback(callback *telegram.CallbackQuery) {
 }
 
 // showWindow rewrites the message whose button was pressed so that it shows
-// the window req opened and the button that ends it.
-func (h *Handler) showWindow(callback *telegram.CallbackQuery, req *models.ApprovalRequest, approver string) error {
+// the window req opened and the button that ends it, and returns that
+// message's ID.
+func (h *Handler) showWindow(callback *telegram.CallbackQuery, req *models.ApprovalRequest, approver string) (int, error) {
 	messageID := req.TelegramMsgID
 	if messageID == 0 && callback.Message != nil {
 		// The tap can arrive before the message ID is on the request.
 		messageID = callback.Message.MessageID
 	}
 	if messageID == 0 {
-		return errors.New("no message to show the approval window on")
+		return 0, errors.New("no message to show the approval window on")
 	}
-	return h.notifier.UpdateMessageApproved(messageID, req, approver)
+	return messageID, h.notifier.UpdateMessageApproved(messageID, req, approver)
 }
 
 // endSession closes an approval window, and with it every other window of the
