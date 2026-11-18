@@ -251,23 +251,25 @@ func windowReleases(r *models.WindowReport) string {
 	return text
 }
 
-// releaseLine is one release in a window report: when, what, and why. The IP is
-// shown only when it is not the one the window was opened from.
+// releaseLine is one release in a window report: when, what from which vault,
+// and why. The IP is shown only when it is not the one the window was opened
+// from.
 func releaseLine(req, opened *models.ApprovalRequest) string {
-	names := []string{req.SecretName}
+	secrets := []models.SecretRequest{{SecretName: req.SecretName, Vault: req.Vault}}
 	if len(req.Secrets) > 1 {
-		names = make([]string, len(req.Secrets))
-		for i, s := range req.Secrets {
-			names[i] = s.SecretName
-		}
+		secrets = req.Secrets
 	}
 
 	shown := make([]string, 0, maxReleaseSecrets)
-	for _, name := range names[:min(len(names), maxReleaseSecrets)] {
-		shown = append(shown, code(cut(name, maxReleaseNameLength)))
+	for _, s := range secrets[:min(len(secrets), maxReleaseSecrets)] {
+		name := code(cut(s.SecretName, maxReleaseNameLength))
+		if s.Vault != "" {
+			name += " in " + code(cut(s.Vault, maxReleaseNameLength))
+		}
+		shown = append(shown, name)
 	}
 	line := req.RequestedAt.Format("15:04:05") + " " + strings.Join(shown, ", ")
-	if more := len(names) - len(shown); more > 0 {
+	if more := len(secrets) - len(shown); more > 0 {
 		line += fmt.Sprintf(" +%d more", more)
 	}
 
@@ -615,11 +617,30 @@ func (c *Client) editMessage(messageID int, text string, keyboard *InlineKeyboar
 	}
 
 	if !apiResp.OK {
-		return fmt.Errorf("telegram API error: %s", apiResp.Description)
+		return editError(apiResp.Description)
 	}
 
 	return nil
 }
+
+// editError is the error for an edit that Telegram refused with description.
+// An edit that would change nothing is no error: the message already shows
+// what was asked.
+func editError(description string) error {
+	switch {
+	case strings.Contains(description, "message is not modified"):
+		return nil
+	case strings.Contains(description, "message to edit not found"),
+		strings.Contains(description, "message can't be edited"),
+		strings.Contains(description, "MESSAGE_ID_INVALID"):
+		return fmt.Errorf("telegram API error: %s: %w", description, ErrMessageGone)
+	}
+	return fmt.Errorf("telegram API error: %s", description)
+}
+
+// ErrMessageGone is the error for an edit of a message that is no longer there
+// or can no longer be edited, as when the approver deleted it.
+var ErrMessageGone = errors.New("the message can no longer be edited")
 
 // withoutURL drops the request URL from an HTTP client error. The URL carries
 // the bot token, and these errors end up in the server log.

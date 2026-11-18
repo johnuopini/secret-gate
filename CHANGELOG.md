@@ -4,8 +4,8 @@
 
 ### Changed
 
-- **Releases under an approval window no longer notify.** Instead of a new Telegram message per release, the gate updates the approval message where the window was opened: it counts the releases, lists the latest five with time, secrets and reason, and keeps the **End approval window** button. Editing a message does not notify, so a busy window stays quiet.
-- If that message cannot be updated, for example because it was deleted, the report moves to one new silent message and later releases update that one. A release that can be shown in neither is refused, as before.
+- **Releases under an approval window no longer notify.** Instead of a new Telegram message per release, the gate updates the approval message where the window was opened: it counts the releases, lists the latest five with time, secrets and their vaults, and reason, and keeps the **End approval window** button. Editing a message does not notify, so a busy window stays quiet.
+- If that message is gone, for example because it was deleted, the report moves to one new silent message and later releases update that one. If Telegram refuses the update for another reason, or the release can be shown in neither, it is refused, as before.
 - A release whose window is ended while it is being shown is taken back from the message and asked about instead.
 
 ## v0.3.0 — Approval Window

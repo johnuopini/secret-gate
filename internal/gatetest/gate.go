@@ -290,7 +290,11 @@ func (n *Notifier) SendApprovalRequest(req *models.ApprovalRequest, webhookBaseU
 // UpdateWindowReport implements handlers.Notifier.
 func (n *Notifier) UpdateWindowReport(messageID int, r *models.WindowReport) error {
 	n.mu.Lock()
-	if n.failReleases || n.failEdits || n.deleted[messageID] {
+	if n.deleted[messageID] {
+		n.mu.Unlock()
+		return fmt.Errorf("message %d: %w", messageID, telegram.ErrMessageGone)
+	}
+	if n.failReleases || n.failEdits {
 		n.mu.Unlock()
 		return errors.New("telegram refused the edit")
 	}

@@ -261,9 +261,9 @@ secret-gate daemon stop      # Stop the daemon
 Approving every secret one by one gets tiring during a long working session. When a request comes from a client with a daemon, the Telegram message has a third button, **Approve for 8h**. It approves that request and opens an approval window for the requesting machine:
 
 - Until the window closes, later requests from that machine are released without a new tap, whatever secret they ask for.
-- Releases do not notify you. Each one updates the approval message where you tapped **Approve for 8h**: it counts the releases and lists the latest five, with time, secrets and reason, and an IP when it differs from the one that opened the window. An edited message makes no sound and shows no banner.
+- Releases do not notify you. Each one updates the approval message where you tapped **Approve for 8h**: it counts the releases and lists the latest five, with time, secrets and their vaults, reason, and an IP when it differs from the one that opened the window. An edited message makes no sound and shows no banner.
 - That message keeps the **End approval window** button. Tapping it closes every window of that machine at once; requests already released stay released.
-- If the approval message cannot be updated, for example because you deleted it, the report moves to one new silent message and later releases update that one.
+- If the approval message is gone, for example because you deleted it, the report moves to one new silent message and later releases update that one. If Telegram refuses the update for another reason, such as too many updates at once, the release is refused and the request can be sent again.
 - A plain **Approve** still approves only the one request and opens nothing.
 - The window is a random token that the daemon keeps in memory and presents with each request. It is bound to the machine name the client reports and to one gate server URL.
 - `daemon flush` and `daemon stop` make the machine forget the token, but the window stays open on the gate until it expires or you end it from Telegram.

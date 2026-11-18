@@ -295,6 +295,23 @@ func TestRequest_UnderAWindow_WhenTheWindowMessageIsGone_MovesTheReportToOneNewM
 	}
 }
 
+func TestRequest_UnderAWindow_WhenTelegramRefusesTheEditForAnotherReason_IsRefusedAndTheReportStays(t *testing.T) {
+	gate := gatetest.Start(t, vault)
+	windowToken := openWindow(t, gate)
+	gate.Notifier.FailEdits()
+
+	code, reply := askFromWindowClient(t, gate, "devvm", "db", windowToken)
+
+	if code != http.StatusServiceUnavailable || reply.Token != "" {
+		t.Errorf("POST /request = %d with token %q, want %d without one", code, reply.Token, http.StatusServiceUnavailable)
+	}
+	for _, r := range gate.Notifier.WindowReports() {
+		if r.New {
+			t.Errorf("report moved to new message %d, although the window message is still there", r.MessageID)
+		}
+	}
+}
+
 func TestRequest_UnderAWindow_ConcurrentReleases_AreAllCounted(t *testing.T) {
 	gate := gatetest.Start(t, vault)
 	windowToken := openWindow(t, gate)

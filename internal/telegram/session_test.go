@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -254,7 +255,7 @@ func TestWindowReport_LongReasonAndBigBatch_StayShort(t *testing.T) {
 
 	batch := release("", "10.0.0.7", strings.Repeat("x", 500))
 	for i := range 20 {
-		batch.Secrets = append(batch.Secrets, models.SecretRequest{SecretName: fmt.Sprintf("alpha%02d", i)})
+		batch.Secrets = append(batch.Secrets, models.SecretRequest{SecretName: fmt.Sprintf("alpha%02d", i), Vault: strings.Repeat("v", 500)})
 	}
 	report := testReport(5, batch, batch, batch, batch, batch)
 	// An opening batch too big to repeat in full.
@@ -268,12 +269,90 @@ func TestWindowReport_LongReasonAndBigBatch_StayShort(t *testing.T) {
 	if strings.Contains(text, strings.Repeat("x", 81)) {
 		t.Error("a release shows more than 80 characters of its reason")
 	}
+	if strings.Contains(text, strings.Repeat("v", 41)) {
+		t.Error("a release shows more than 40 characters of a vault")
+	}
 	if !strings.Contains(text, "alpha04") || strings.Contains(text, "alpha05") || !strings.Contains(text, "+15 more") {
 		t.Errorf("a release of 20 secrets does not show the first 5 and +15 more:\n%s", text)
 	}
 	// Telegram rejects messages over 4096 characters.
 	if len(text) > 4096 {
 		t.Errorf("report is %d bytes, Telegram allows 4096 characters", len(text))
+	}
+}
+
+func TestWindowReport_NamesTheVaultOfEachReleasedSecret(t *testing.T) {
+	c, calls := recordingAPI(t)
+	single := release("db", "10.0.0.7", "deploy")
+	single.Vault = "Prod"
+	batch := release("", "10.0.0.7", "deploy")
+	batch.Secrets = []models.SecretRequest{{SecretName: "api", Vault: "Dev"}, {SecretName: "cache"}}
+	anyVault := release("queue", "10.0.0.7", "deploy")
+	anyVault.Vault = ""
+
+	c.UpdateWindowReport(77, testReport(3, single, batch, anyVault))
+
+	text := (*calls)[0].Body["text"].(string)
+	for _, want := range []string{
+		"<code>db</code> in <code>Prod</code> — ",
+		"<code>api</code> in <code>Dev</code>, <code>cache</code> — ",
+		"<code>queue</code> — ",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("report does not show %q:\n%s", want, text)
+		}
+	}
+}
+
+// replyingAPI answers every Bot API call with status and body.
+func replyingAPI(t *testing.T, status int, body string) *Client {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(testToken, 42)
+	c.baseURL = srv.URL + "/bot" + testToken
+	return c
+}
+
+func TestUpdateWindowReport_OfAMessageThatIsGone_SaysSo(t *testing.T) {
+	for _, description := range []string{"Bad Request: message to edit not found", "Bad Request: message can't be edited"} {
+		c := replyingAPI(t, http.StatusBadRequest, fmt.Sprintf(`{"ok":false,"error_code":400,"description":%q}`, description))
+
+		err := c.UpdateWindowReport(77, testReport(1, release("db", "10.0.0.7", "deploy")))
+
+		if !errors.Is(err, ErrMessageGone) {
+			t.Errorf("%q: error = %v, want ErrMessageGone", description, err)
+		}
+	}
+}
+
+func TestUpdateWindowReport_WhenTelegramIsBusyOrDown_DoesNotSayTheMessageIsGone(t *testing.T) {
+	replies := map[int]string{
+		http.StatusTooManyRequests: `{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 5","parameters":{"retry_after":5}}`,
+		http.StatusBadGateway:      `<html>Bad Gateway</html>`,
+		http.StatusBadRequest:      `{"ok":false,"error_code":400,"description":"Bad Request: message is too long"}`,
+	}
+	for status, body := range replies {
+		c := replyingAPI(t, status, body)
+
+		err := c.UpdateWindowReport(77, testReport(1, release("db", "10.0.0.7", "deploy")))
+
+		if err == nil || errors.Is(err, ErrMessageGone) {
+			t.Errorf("%d: error = %v, want an error that does not say the message is gone", status, err)
+		}
+	}
+}
+
+func TestUpdateWindowReport_ThatChangesNothing_Succeeds(t *testing.T) {
+	c := replyingAPI(t, http.StatusBadRequest, `{"ok":false,"error_code":400,"description":"Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message"}`)
+
+	if err := c.UpdateWindowReport(77, testReport(1, release("db", "10.0.0.7", "deploy"))); err != nil {
+		t.Errorf("UpdateWindowReport = %v, want success: the message already shows the report", err)
 	}
 }
 

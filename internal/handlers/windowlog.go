@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/johnuopini/secret-gate/internal/logger"
 	"github.com/johnuopini/secret-gate/internal/models"
 	"github.com/johnuopini/secret-gate/internal/session"
+	"github.com/johnuopini/secret-gate/internal/telegram"
 )
 
 // maxReportedReleases is how many of the latest releases a window report
@@ -106,15 +108,20 @@ func (h *Handler) reportRelease(sess session.Session, token string, req *models.
 }
 
 // showReport puts report on the message of log, which the caller holds. When
-// that message cannot be edited, as when the approver deleted it, the report
-// moves to a new message, and later reports go there.
+// that message is gone, as when the approver deleted it, the report moves to a
+// new message, and later reports go there. Any other failure, such as Telegram
+// being busy, is returned: moving then would leave a message that is still
+// there with a count that stops.
 func (h *Handler) showReport(log *windowLog, report *models.WindowReport) (int, error) {
 	if log.messageID != 0 {
 		err := h.notifier.UpdateWindowReport(log.messageID, report)
 		if err == nil {
 			return log.messageID, nil
 		}
-		h.log.Error("Failed to update the approval window report, moving it to a new message", logger.F("error", err.Error(), "session_id", report.SessionID, "message_id", log.messageID))
+		if !errors.Is(err, telegram.ErrMessageGone) {
+			return 0, err
+		}
+		h.log.Error("The approval window message is gone, moving its report to a new message", logger.F("error", err.Error(), "session_id", report.SessionID, "message_id", log.messageID))
 	}
 
 	report.Moved = true
