@@ -261,13 +261,15 @@ secret-gate daemon stop      # Stop the daemon
 Approving every secret one by one gets tiring during a long working session. When a request comes from a client with a daemon, the Telegram message has a third button, **Approve for 8h**. It approves that request and opens an approval window for the requesting machine:
 
 - Until the window closes, later requests from that machine are released without a new tap, whatever secret they ask for.
-- Every such release is reported in the chat with a silent message that carries an **End approval window** button. Tapping it closes every window of that machine at once; requests already released stay released.
+- Releases do not notify you. Each one updates the approval message where you tapped **Approve for 8h**: it counts the releases and lists the latest five, with time, secrets and reason, and an IP when it differs from the one that opened the window. An edited message makes no sound and shows no banner.
+- That message keeps the **End approval window** button. Tapping it closes every window of that machine at once; requests already released stay released.
+- If the approval message cannot be updated, for example because you deleted it, the report moves to one new silent message and later releases update that one.
 - A plain **Approve** still approves only the one request and opens nothing.
 - The window is a random token that the daemon keeps in memory and presents with each request. It is bound to the machine name the client reports and to one gate server URL.
 - `daemon flush` and `daemon stop` make the machine forget the token, but the window stays open on the gate until it expires or you end it from Telegram.
 - Windows live in the server's memory, so a server restart closes all of them.
-- A release that cannot be reported to Telegram is refused.
-- Under a window, a secret requested without a vault must be named by its exact title, and that title must belong to one item only across all vaults. A name that only comes close is reported in the chat but nothing is handed out; the error names the closest title.
+- A release that cannot be shown in Telegram is refused.
+- Under a window, a secret requested without a vault must be named by its exact title, and that title must belong to one item only across all vaults. A name that only comes close is listed in the window's message but nothing is handed out; the error names the closest title.
 - If the approval message cannot be updated to show the window and its end button, the tap approves that one request and opens no window.
 - If the secret whose approval opened the window cannot be fetched, that window is closed again and the chat says so. Other windows of the machine stay open.
 - `--no-cache` neither asks for a window nor uses an open one.
@@ -298,7 +300,7 @@ For detailed request/response schemas, see the OpenAPI spec at `/openapi.json` o
 - **Unix socket IPC.** The daemon listens on a Unix socket with `0600` permissions, accessible only to the owning user.
 - **SSH agent integration.** SSH keys are added to ssh-agent with a TTL that matches the cache expiry, so they are automatically removed. If the agent is unavailable or disabled, `ssh_with_secret` gives the key to `ssh -i` through a temp file that is deleted when the command ends.
 - **Telegram approval gate.** Every secret access requires explicit human approval through Telegram inline buttons, unless you opened an approval window for that machine.
-- **Approval windows are a trade-off.** While a window is open, whoever holds its token and reports the same machine name can get any secret the gate can reach, without a tap. The token lives only in the daemon's memory, every release is reported to Telegram, and one tap ends the window. Use plain **Approve**, or set `SESSION_TTL=0`, where that trade is not acceptable.
+- **Approval windows are a trade-off.** While a window is open, whoever holds its token and reports the same machine name can get any secret the gate can reach, without a tap. The token lives only in the daemon's memory, every release is listed in the window's Telegram message, and one tap ends the window. Releases are silent, so you see them when you look at the chat, not when they happen. Use plain **Approve**, or set `SESSION_TTL=0`, where that trade is not acceptable.
 - **One-time tokens.** Secret retrieval tokens can only be used once. A second fetch returns an error.
 - **Configurable TTL.** All approval requests expire after a configurable duration (default: 15 minutes).
 

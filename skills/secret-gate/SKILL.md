@@ -75,7 +75,7 @@ The secret-gate client includes a background daemon that caches approved secrets
 
 ### Approval window
 
-The approver can answer a request with **Approve for 8h** instead of **Approve**. That opens an approval window for this machine: until it closes, further requests from this machine are released without a new tap, and each one is reported to the approver in Telegram, who can end the window at any time.
+The approver can answer a request with **Approve for 8h** instead of **Approve**. That opens an approval window for this machine: until it closes, further requests from this machine are released without a new tap. Each release is listed, silently, in the approver's Telegram message for that window, and the approver can end the window from there at any time.
 
 - The client says so on stderr ("Approval window open until ...") and `daemon status` lists it
 - No such line means no window: for example the secret could not be fetched, and the next request asks for approval again
